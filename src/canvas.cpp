@@ -2,15 +2,13 @@
 
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
+#include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/managers/PointerManager.hpp>
-#include <hyprland/src/managers/XWaylandManager.hpp>
-#include <hyprland/src/protocols/XDGShell.hpp>
 #include <hyprland/src/render/Renderer.hpp>
-#include <hyprland/src/render/OpenGL.hpp>
+#include <hyprland/src/layout/LayoutManager.hpp>
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdarg>
@@ -18,8 +16,7 @@
 
 static void logf(const char* fmt, ...) {
     FILE* f = fopen("/tmp/hypr-canvas.log", "a");
-    if (!f)
-        return;
+    if (!f) return;
     va_list args;
     va_start(args, fmt);
     vfprintf(f, fmt, args);
@@ -29,21 +26,19 @@ static void logf(const char* fmt, ...) {
 
 static void scheduleFrame() {
     auto mon = Desktop::focusState()->monitor();
-    if (mon)
+    if (mon) {
+        g_pHyprRenderer->damageMonitor(mon);
         g_pCompositor->scheduleFrameForMonitor(mon);
+    }
 }
 
 // --- Forward typedefs ---
-using PHLMONITOR   = SP<CMonitor>;
-using PHLWORKSPACE = SP<CWorkspace>;
-using PHLWINDOW    = SP<Desktop::View::CWindow>;
-using steady_tp    = std::chrono::steady_clock::time_point;
-typedef Vector2D (*positionFn)(CPointerManager*);
-typedef PHLMONITOR (*getMonitorFromCursorFn)(CCompositor*);
+using PHLWINDOW = SP<Desktop::View::CWindow>;
 
 // --- Scroll/zoom hook ---
 
 typedef void (*onMouseWheelFn)(CInputManager*, IPointer::SAxisEvent, SP<IPointer>);
+typedef Vector2D (*positionFn)(CPointerManager*);
 
 static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPointer> pointer) {
     const uint32_t mods = g_pInputManager->getModsFromAllKBs();
@@ -51,20 +46,29 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
     if ((mods & HL_MODIFIER_META) && g_pCanvas && e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL) {
         const double scrollDelta = (e.deltaDiscrete != 0) ? (double)e.deltaDiscrete : e.delta;
         if (scrollDelta != 0) {
-            double newZoom = g_pCanvas->zoom;
-            if (scrollDelta < 0)
-                newZoom *= CCanvas::ZOOM_STEP;
-            else
-                newZoom /= CCanvas::ZOOM_STEP;
+            if (!g_pCanvas->active)
+                g_pCanvas->enter();
 
-            // Get raw screen coords (bypass our canvas-space hook)
-            auto rawPos = (positionFn)g_pCanvas->m_positionHook->m_original;
-            const auto cursorScreen = rawPos(g_pPointerManager.get());
-            g_pCanvas->applyZoom(newZoom, cursorScreen);
+            const double zoomFactor = std::pow(CCanvas::ZOOM_STEP, std::abs(scrollDelta));
+            double       newZoom    = g_pCanvas->zoom;
+            if (scrollDelta < 0)
+                newZoom *= zoomFactor;
+            else
+                newZoom /= zoomFactor;
+
+            // Center-anchored zoom feels more like a desktop camera than a drag.
+            auto mon = Desktop::focusState()->monitor();
+            if (!mon)
+                return;
+
+            const auto monSize = mon->m_transformedSize;
+            const Vector2D center = {monSize.x / 2.0, monSize.y / 2.0};
+
+            g_pCanvas->applyZoom(newZoom, center);
+            g_pCanvas->repositionWindows();
 
             logf("[hypr-canvas] zoom=%.3f offset=(%.1f, %.1f)\n",
                  g_pCanvas->zoom, g_pCanvas->offset.x, g_pCanvas->offset.y);
-
             scheduleFrame();
             return;
         }
@@ -79,27 +83,80 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
 typedef void (*onMouseButtonFn)(CInputManager*, IPointer::SButtonEvent);
 
 static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e) {
-    if (g_pCanvas && g_pCanvas->isTransformed() && e.button == BTN_LEFT) {
+    if (g_pCanvas && (e.button == BTN_LEFT || e.button == BTN_RIGHT)) {
         const uint32_t mods = g_pInputManager->getModsFromAllKBs();
-        if (mods & HL_MODIFIER_META) {
-            if (e.state == WL_POINTER_BUTTON_STATE_PRESSED) {
-                // Only pan if clicking on empty desktop, not on a window
+        if ((mods & HL_MODIFIER_META) && e.state == WL_POINTER_BUTTON_STATE_PRESSED) {
+            if (!g_pCanvas->active && e.button == BTN_LEFT) {
                 const auto coords = g_pInputManager->getMouseCoordsInternal();
                 using namespace Desktop::View;
                 auto windowUnder = g_pCompositor->vectorToWindowUnified(coords, RESERVED_EXTENTS | INPUT_EXTENTS | ALLOW_FLOATING);
+
                 if (!windowUnder) {
+                    g_pCanvas->enter();
                     g_pCanvas->m_panning = true;
                     logf("[hypr-canvas] pan start\n");
                     return;
                 }
             }
+
+            if (!g_pCanvas->active) {
+                auto original = (onMouseButtonFn)g_pCanvas->m_mouseButtonHook->m_original;
+                original(self, e);
+                return;
+            }
+
+            if (e.state == WL_POINTER_BUTTON_STATE_PRESSED) {
+                const auto coords = g_pInputManager->getMouseCoordsInternal();
+                using namespace Desktop::View;
+                auto windowUnder = g_pCompositor->vectorToWindowUnified(coords, RESERVED_EXTENTS | INPUT_EXTENTS | ALLOW_FLOATING);
+
+                if (e.button == BTN_LEFT && !windowUnder) {
+                    g_pCanvas->m_panning = true;
+                    logf("[hypr-canvas] pan start\n");
+                    return;
+                }
+
+                if (windowUnder) {
+                    const uint64_t id = (uint64_t)windowUnder.get();
+                    if (g_pCanvas->m_savedStates.contains(id)) {
+                        g_pCanvas->m_dragWindow = id;
+
+                        if (e.button == BTN_LEFT) {
+                            g_pCanvas->m_movingWindow = true;
+                            g_pCanvas->m_resizingWindow = false;
+                            logf("[hypr-canvas] window move start id=%lx\n", id);
+                            return;
+                        }
+
+                        if (e.button == BTN_RIGHT) {
+                            g_pCanvas->m_resizingWindow = true;
+                            g_pCanvas->m_movingWindow = false;
+                            logf("[hypr-canvas] window resize start id=%lx\n", id);
+                            return;
+                        }
+                    }
+                }
+            }
         }
     }
 
-    // Release panning on button release
     if (g_pCanvas && g_pCanvas->m_panning && e.button == BTN_LEFT && e.state == WL_POINTER_BUTTON_STATE_RELEASED) {
         g_pCanvas->m_panning = false;
         logf("[hypr-canvas] pan stop\n");
+        return;
+    }
+
+    if (g_pCanvas && g_pCanvas->m_movingWindow && e.button == BTN_LEFT && e.state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        logf("[hypr-canvas] window move stop id=%lx\n", g_pCanvas->m_dragWindow);
+        g_pCanvas->m_movingWindow = false;
+        g_pCanvas->m_dragWindow = 0;
+        return;
+    }
+
+    if (g_pCanvas && g_pCanvas->m_resizingWindow && e.button == BTN_RIGHT && e.state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        logf("[hypr-canvas] window resize stop id=%lx\n", g_pCanvas->m_dragWindow);
+        g_pCanvas->m_resizingWindow = false;
+        g_pCanvas->m_dragWindow = 0;
         return;
     }
 
@@ -112,297 +169,323 @@ static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e) {
 typedef void (*onMouseMovedFn)(CInputManager*, IPointer::SMotionEvent);
 
 static void hkOnMouseMoved(CInputManager* self, IPointer::SMotionEvent e) {
+    const uint32_t mods = g_pInputManager->getModsFromAllKBs();
+
+    // If we ever miss a button-release event, do not stay stuck in a drag mode.
+    if (g_pCanvas && !(mods & HL_MODIFIER_META) &&
+        (g_pCanvas->m_panning || g_pCanvas->m_movingWindow || g_pCanvas->m_resizingWindow)) {
+        logf("[hypr-canvas] drag watchdog reset (mods released)\n");
+        g_pCanvas->m_panning = false;
+        g_pCanvas->m_movingWindow = false;
+        g_pCanvas->m_resizingWindow = false;
+        g_pCanvas->m_dragWindow = 0;
+    }
+
     if (g_pCanvas && g_pCanvas->m_panning) {
+        // Pan: move viewport by mouse delta
         g_pCanvas->offset.x -= e.delta.x / g_pCanvas->zoom;
         g_pCanvas->offset.y -= e.delta.y / g_pCanvas->zoom;
+        g_pCanvas->repositionWindows();
         scheduleFrame();
         return;
+    }
+
+    if (g_pCanvas && g_pCanvas->m_movingWindow && g_pCanvas->m_dragWindow != 0) {
+        auto it = g_pCanvas->m_savedStates.find(g_pCanvas->m_dragWindow);
+        if (it != g_pCanvas->m_savedStates.end()) {
+            it->second.canvasPos.x += e.delta.x / g_pCanvas->zoom;
+            it->second.canvasPos.y += e.delta.y / g_pCanvas->zoom;
+            g_pCanvas->repositionWindows();
+            scheduleFrame();
+            return;
+        }
+    }
+
+    if (g_pCanvas && g_pCanvas->m_resizingWindow && g_pCanvas->m_dragWindow != 0) {
+        auto it = g_pCanvas->m_savedStates.find(g_pCanvas->m_dragWindow);
+        if (it != g_pCanvas->m_savedStates.end()) {
+            it->second.canvasSize.x = std::max(CCanvas::MIN_WINDOW_W, it->second.canvasSize.x + e.delta.x / g_pCanvas->zoom);
+            it->second.canvasSize.y = std::max(CCanvas::MIN_WINDOW_H, it->second.canvasSize.y + e.delta.y / g_pCanvas->zoom);
+            g_pCanvas->repositionWindows();
+            scheduleFrame();
+            return;
+        }
     }
 
     auto original = (onMouseMovedFn)g_pCanvas->m_mouseMovedHook->m_original;
     original(self, e);
 }
 
+// --- Dispatchers ---
 
-
-// --- Cursor coordinate hook ---
-// position() has 16 call sites including mouseMoveUnified (window finding + surface-local coords)
-
-static Vector2D hkPosition(CPointerManager* self) {
-    auto original = (positionFn)g_pCanvas->m_positionHook->m_original;
-    Vector2D raw = original(self);
-
-    if (g_pCanvas && g_pCanvas->isTransformed() && !g_pCanvas->m_panning) {
-        return g_pCanvas->screenToCanvas(raw);
+SDispatchResult dispatchReset(std::string args) {
+    if (g_pCanvas && g_pCanvas->active) {
+        g_pCanvas->exit();
+        logf("[hypr-canvas] exit canvas mode\n");
+        scheduleFrame();
     }
-    return raw;
+    return {};
 }
 
-// --- Pointer clamping hook ---
-// closestValid() clamps m_pointerPos to monitor layout, preventing the cursor
-// from reaching canvas positions outside the physical monitor. When zoomed,
-// disable clamping so m_pointerPos can hold any canvas-space position.
+SDispatchResult dispatchPan(std::string args) {
+    if (!g_pCanvas)
+        return {};
 
-typedef Vector2D (*closestValidFn)(CPointerManager*, const Vector2D&);
+    Vector2D delta = {0, 0};
+    if (args == "left")       delta.x = CCanvas::PAN_STEP;
+    else if (args == "right") delta.x = -CCanvas::PAN_STEP;
+    else if (args == "up")    delta.y = CCanvas::PAN_STEP;
+    else if (args == "down")  delta.y = -CCanvas::PAN_STEP;
+    else
+        return {};
 
-static Vector2D hkClosestValid(CPointerManager* self, const Vector2D& pos) {
-    if (g_pCanvas && g_pCanvas->isTransformed())
-        return pos;
+    if (!g_pCanvas->active)
+        g_pCanvas->enter();
 
-    auto original = (closestValidFn)g_pCanvas->m_closestValidHook->m_original;
-    return original(self, pos);
+    g_pCanvas->offset.x += delta.x / g_pCanvas->zoom;
+    g_pCanvas->offset.y += delta.y / g_pCanvas->zoom;
+    g_pCanvas->repositionWindows();
+    logf("[hypr-canvas] pan %s → offset=(%.1f, %.1f)\n",
+         args.c_str(), g_pCanvas->offset.x, g_pCanvas->offset.y);
+    scheduleFrame();
+    return {};
 }
 
-// --- Monitor detection hook ---
-// getMonitorFromCursor uses position() which now returns canvas coords.
-// Canvas coords may be outside all monitors, so we bypass and use physical coords.
+SDispatchResult dispatchZoom(std::string args) {
+    if (!g_pCanvas)
+        return {};
 
-static PHLMONITOR hkGetMonitorFromCursor(CCompositor* self) {
-    if (g_pCanvas && g_pCanvas->isTransformed()) {
-        // Just return the focused monitor — cursor is always physically on it
-        return Desktop::focusState()->monitor();
-    }
+    auto mon = Desktop::focusState()->monitor();
+    if (!mon) return {};
 
-    auto original = (getMonitorFromCursorFn)g_pCanvas->m_monitorFromCursorHook->m_original;
-    return original(self);
+    const auto monSize = mon->m_transformedSize;
+    const Vector2D center = {monSize.x / 2.0, monSize.y / 2.0};
+
+    double newZoom = g_pCanvas->zoom;
+    if (args == "in")
+        newZoom *= CCanvas::ZOOM_STEP;
+    else if (args == "out")
+        newZoom /= CCanvas::ZOOM_STEP;
+    else
+        return {};
+
+    if (!g_pCanvas->active)
+        g_pCanvas->enter();
+
+    g_pCanvas->applyZoom(newZoom, center);
+    g_pCanvas->repositionWindows();
+    logf("[hypr-canvas] zoom %s → %.3f\n", args.c_str(), g_pCanvas->zoom);
+    scheduleFrame();
+    return {};
 }
 
-// --- Visibility hook ---
+SDispatchResult dispatchToggle(std::string args) {
+    if (!g_pCanvas) return {};
 
-typedef bool (*shouldRenderFn)(CHyprRenderer*, PHLWINDOW, PHLMONITOR);
-
-static bool hkShouldRenderWindow(CHyprRenderer* self, PHLWINDOW pWindow, PHLMONITOR pMonitor) {
-    auto original = (shouldRenderFn)g_pCanvas->m_shouldRenderHook->m_original;
-
-    // When zoomed out, render all windows — the zoom transform will place them correctly
-    if (g_pCanvas && g_pCanvas->isTransformed())
-        return true;
-
-    return original(self, pWindow, pMonitor);
-}
-
-// --- Render pass damage hook ---
-
-typedef CRegion (*renderPassRenderFn)(CRenderPass*, const CRegion&);
-
-static CRegion hkRenderPassRender(CRenderPass* self, const CRegion& damage) {
-    auto original = (renderPassRenderFn)g_pCanvas->m_renderPassHook->m_original;
-
-    if (g_pCanvas && g_pCanvas->isTransformed()) {
-        // Expand damage to cover the full virtual viewport so no elements get culled
-        auto mon = Desktop::focusState()->monitor();
-        if (mon) {
-            const auto monSize = mon->m_transformedSize;
-            CRegion expanded;
-            expanded.add(CBox{
-                g_pCanvas->offset.x, g_pCanvas->offset.y,
-                monSize.x / g_pCanvas->zoom, monSize.y / g_pCanvas->zoom
-            });
-            return original(self, expanded);
-        }
-    }
-
-    return original(self, damage);
-}
-
-// --- Render hook ---
-
-typedef void (*renderAllClientsFn)(CHyprRenderer*, PHLMONITOR, PHLWORKSPACE, const steady_tp&, const Vector2D&, const float&);
-
-static void hkRenderAllClientsForWorkspace(CHyprRenderer* self, PHLMONITOR pMonitor, PHLWORKSPACE pWorkspace,
-                                           const steady_tp& now, const Vector2D& translate, const float& scale) {
-    auto original = (renderAllClientsFn)g_pCanvas->m_renderHook->m_original;
-
-    if (g_pCanvas && g_pCanvas->isTransformed()) {
-        g_pHyprRenderer->damageMonitor(pMonitor);
-
-        // Clear the full framebuffer so areas outside the wallpaper don't show stale pixels
-        g_pHyprOpenGL->clear(CHyprColor(0.1, 0.1, 0.1, 1.0));
-
-        // Disable render pass simplification and expand damage/clip to full virtual viewport
-        const auto monSize = pMonitor->m_transformedSize;
-        CBox virtualViewport = {
-            g_pCanvas->offset.x, g_pCanvas->offset.y,
-            monSize.x / g_pCanvas->zoom, monSize.y / g_pCanvas->zoom
-        };
-        g_pHyprOpenGL->m_renderData.damage.add(virtualViewport);
-        g_pHyprOpenGL->m_renderData.clipBox = {};  // no clip
-        g_pHyprOpenGL->m_renderData.noSimplify = true;
-
-        // SRenderModifData applies translate then scale: (W + translate) * scale
-        // We want (W - offset) * zoom, so translate = -offset
-        Vector2D canvasTranslate = {-g_pCanvas->offset.x, -g_pCanvas->offset.y};
-        float    canvasScale     = (float)g_pCanvas->zoom;
-        original(self, pMonitor, pWorkspace, now, canvasTranslate, canvasScale);
+    if (g_pCanvas->active) {
+        g_pCanvas->exit();
+        logf("[hypr-canvas] canvas OFF\n");
     } else {
-        original(self, pMonitor, pWorkspace, now, translate, scale);
+        g_pCanvas->enter();
+        logf("[hypr-canvas] canvas ON\n");
     }
+    scheduleFrame();
+    return {};
 }
 
-// --- Monitor-from-vector hook ---
-// getMonitorFromVector is used by vectorToWindowUnified and many others.
-// Canvas coords outside the physical monitor return null, blocking window lookup.
-
-typedef PHLMONITOR (*getMonitorFromVectorFn)(CCompositor*, const Vector2D&);
-
-static PHLMONITOR hkGetMonitorFromVector(CCompositor* self, const Vector2D& pos) {
-    auto original = (getMonitorFromVectorFn)g_pCanvas->m_monitorFromVectorHook->m_original;
-
-    if (g_pCanvas && g_pCanvas->isTransformed()) {
-        auto result = original(self, pos);
-        if (!result)
-            return Desktop::focusState()->monitor();
-        return result;
-    }
-
-    return original(self, pos);
-}
-
-// --- Popup positioning hook ---
-// When zoomed, expand the constraint box so popups aren't clamped to the physical monitor
-
-typedef void (*applyPositioningFn)(CXDGPopupResource*, const CBox&, const Vector2D&);
-
-static void hkApplyPositioning(CXDGPopupResource* self, const CBox& availableBox, const Vector2D& t1coord) {
-    auto original = (applyPositioningFn)g_pCanvas->m_popupPositionHook->m_original;
-
-    if (g_pCanvas && g_pCanvas->isTransformed()) {
-        // Use a very large constraint box so popups aren't clamped
-        CBox expanded = {-100000, -100000, 200000, 200000};
-        original(self, expanded, t1coord);
-        return;
-    }
-
-    original(self, availableBox, t1coord);
-}
-
-// --- XWayland coordinate hook ---
-// XWayland apps use absolute X11 coords. waylandToXWaylandCoords maps via
-// monitor positions. Canvas coords outside the monitor produce wrong mapping.
-// Fix: convert canvas→physical before the mapping, so XWayland sees physical coords.
-
-typedef Vector2D (*waylandToXWCoordFn)(CHyprXWaylandManager*, const Vector2D&);
-
-static Vector2D hkWaylandToXWaylandCoords(CHyprXWaylandManager* self, const Vector2D& coord) {
-    auto original = (waylandToXWCoordFn)g_pCanvas->m_waylandToXWCoordHook->m_original;
-
-    if (g_pCanvas && g_pCanvas->isTransformed()) {
-        // coord is in canvas space — convert back to physical for XWayland mapping
-        Vector2D physical = g_pCanvas->canvasToScreen(coord);
-        return original(self, physical);
-    }
-
-    return original(self, coord);
-}
-
-// --- Constructor / Destructor ---
+// --- Hook helper ---
 
 static CFunctionHook* hookByName(const std::string& name, void* dest) {
     auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, name);
     logf("[hypr-canvas] %s: %zu matches\n", name.c_str(), fns.size());
-    if (fns.empty())
-        return nullptr;
+    if (fns.empty()) return nullptr;
     auto hook = HyprlandAPI::createFunctionHook(PHANDLE, fns[0].address, dest);
     if (hook && hook->hook())
         logf("[hypr-canvas] hooked %s\n", name.c_str());
     return hook;
 }
 
+// --- Constructor / Destructor ---
+
 CCanvas::CCanvas() {
     m_mouseWheelHook  = hookByName("onMouseWheel", (void*)&hkOnMouseWheel);
     m_mouseButtonHook = hookByName("onMouseButton", (void*)&hkOnMouseButton);
     m_mouseMovedHook  = hookByName("onMouseMoved", (void*)&hkOnMouseMoved);
-    // Hook position() — 16 call sites including mouseMoveUnified for window finding + surface-local
-    {
-        auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, std::string("position"));
-        for (auto& fn : fns) {
-            if (fn.demangled.find("CPointerManager") != std::string::npos) {
-                logf("[hypr-canvas] found CPointerManager::position() @ %p\n", fn.address);
-                m_positionHook = HyprlandAPI::createFunctionHook(PHANDLE, fn.address, (void*)&hkPosition);
-                if (m_positionHook) m_positionHook->hook();
-                break;
-            }
-        }
-    }
-    m_closestValidHook      = hookByName("closestValid", (void*)&hkClosestValid);
-    m_monitorFromCursorHook = hookByName("getMonitorFromCursor", (void*)&hkGetMonitorFromCursor);
-    m_monitorFromVectorHook = hookByName("getMonitorFromVector", (void*)&hkGetMonitorFromVector);
-    m_popupPositionHook     = hookByName("applyPositioning", (void*)&hkApplyPositioning);
-    // Hook shouldRenderWindow to disable culling when zoomed out
-    {
-        auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, std::string("shouldRenderWindow"));
-        for (auto& fn : fns) {
-            // Match the 2-arg overload (PHLWINDOW, PHLMONITOR)
-            if (fn.demangled.find("CMonitor") != std::string::npos) {
-                logf("[hypr-canvas] found shouldRenderWindow(window,monitor) @ %p\n", fn.address);
-                m_shouldRenderHook = HyprlandAPI::createFunctionHook(PHANDLE, fn.address, (void*)&hkShouldRenderWindow);
-                if (m_shouldRenderHook) m_shouldRenderHook->hook();
-                break;
-            }
-        }
-    }
-    // Hook render pass to expand damage region when zoomed
-    {
-        auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, std::string("render"));
-        for (auto& fn : fns) {
-            if (fn.demangled.find("CRenderPass") != std::string::npos) {
-                logf("[hypr-canvas] found CRenderPass::render @ %p\n", fn.address);
-                m_renderPassHook = HyprlandAPI::createFunctionHook(PHANDLE, fn.address, (void*)&hkRenderPassRender);
-                if (m_renderPassHook) m_renderPassHook->hook();
-                break;
-            }
-        }
-    }
-    m_renderHook      = hookByName("renderAllClientsForWorkspace", (void*)&hkRenderAllClientsForWorkspace);
-    m_waylandToXWCoordHook = hookByName("waylandToXWaylandCoords", (void*)&hkWaylandToXWaylandCoords);
-    logf("[hypr-canvas] initialized\n");
+    logf("[hypr-canvas] initialized (VXWM mode — no render hooks)\n");
 }
 
 CCanvas::~CCanvas() {
+    // Restore windows if still in canvas mode
+    if (active)
+        exit();
+
     if (m_mouseWheelHook)
         HyprlandAPI::removeFunctionHook(PHANDLE, m_mouseWheelHook);
     if (m_mouseButtonHook)
         HyprlandAPI::removeFunctionHook(PHANDLE, m_mouseButtonHook);
     if (m_mouseMovedHook)
         HyprlandAPI::removeFunctionHook(PHANDLE, m_mouseMovedHook);
-    if (m_positionHook)
-        HyprlandAPI::removeFunctionHook(PHANDLE, m_positionHook);
-    if (m_closestValidHook)
-        HyprlandAPI::removeFunctionHook(PHANDLE, m_closestValidHook);
-    if (m_monitorFromCursorHook)
-        HyprlandAPI::removeFunctionHook(PHANDLE, m_monitorFromCursorHook);
-    if (m_monitorFromVectorHook)
-        HyprlandAPI::removeFunctionHook(PHANDLE, m_monitorFromVectorHook);
-    if (m_popupPositionHook)
-        HyprlandAPI::removeFunctionHook(PHANDLE, m_popupPositionHook);
-    if (m_shouldRenderHook)
-        HyprlandAPI::removeFunctionHook(PHANDLE, m_shouldRenderHook);
-    if (m_renderPassHook)
-        HyprlandAPI::removeFunctionHook(PHANDLE, m_renderPassHook);
-    if (m_renderHook)
-        HyprlandAPI::removeFunctionHook(PHANDLE, m_renderHook);
-    if (m_waylandToXWCoordHook)
-        HyprlandAPI::removeFunctionHook(PHANDLE, m_waylandToXWCoordHook);
 }
 
-// --- Coordinate transforms ---
+// --- Canvas mode enter/exit ---
 
-Vector2D CCanvas::screenToCanvas(const Vector2D& screen) const {
-    return offset + screen / zoom;
+void CCanvas::enter() {
+    active = true;
+    zoom = 1.0;
+    offset = {0, 0};
+    m_savedStates.clear();
+    m_panning = false;
+    m_movingWindow = false;
+    m_resizingWindow = false;
+    m_dragWindow = 0;
+
+    // Save all window positions and float them
+    for (auto& w : g_pCompositor->m_windows) {
+        if (!w || w->isHidden() || !w->m_isMapped)
+            continue;
+
+        uint64_t id = (uint64_t)w.get();
+        const Vector2D currentPos  = w->m_realPosition->value();
+        const Vector2D currentSize = w->m_realSize->value();
+
+        SWindowState state;
+        state.restorePos  = currentPos;
+        state.restoreSize = currentSize;
+        state.wasFloating = w->m_isFloating;
+
+        if (w->m_isFloating) {
+            state.canvasPos  = currentPos;
+            state.canvasSize = currentSize;
+        } else {
+            // Normalize tiled windows into independent canvas cards while
+            // preserving their visual center. This avoids the "everything is
+            // still tiled together" feeling when we zoom the canvas.
+            const Vector2D center = {
+                currentPos.x + currentSize.x / 2.0,
+                currentPos.y + currentSize.y / 2.0
+            };
+            state.canvasSize = {CANVAS_REF_W, CANVAS_REF_H};
+            state.canvasPos = {
+                center.x - state.canvasSize.x / 2.0,
+                center.y - state.canvasSize.y / 2.0
+            };
+        }
+        m_savedStates[id] = state;
+
+        g_pHyprRenderer->damageWindow(w);
+
+        // Float the window if it's tiled
+        if (!w->m_isFloating) {
+            w->m_isFloating = true;
+        }
+
+        w->m_realPosition->setValueAndWarp(state.canvasPos);
+        w->m_realSize->setValueAndWarp(state.canvasSize);
+        w->m_position = state.canvasPos;
+        w->m_size = state.canvasSize;
+        g_pHyprRenderer->damageWindow(w);
+    }
+
+    logf("[hypr-canvas] entered canvas mode, saved %zu windows\n", m_savedStates.size());
 }
 
-Vector2D CCanvas::canvasToScreen(const Vector2D& canvas) const {
-    return (canvas - offset) * zoom;
+void CCanvas::exit() {
+    // Restore all saved window positions and float state
+    for (auto& w : g_pCompositor->m_windows) {
+        if (!w || w->isHidden() || !w->m_isMapped)
+            continue;
+
+        uint64_t id = (uint64_t)w.get();
+        auto it = m_savedStates.find(id);
+        if (it == m_savedStates.end())
+            continue;
+
+        const auto& saved = it->second;
+        g_pHyprRenderer->damageWindow(w);
+        w->m_realPosition->setValueAndWarp(saved.restorePos);
+        w->m_realSize->setValueAndWarp(saved.restoreSize);
+        w->m_position = saved.restorePos;
+        w->m_size = saved.restoreSize;
+
+        if (!saved.wasFloating) {
+            w->m_isFloating = false;
+        }
+        g_pHyprRenderer->damageWindow(w);
+    }
+
+    m_savedStates.clear();
+    active = false;
+    zoom = 1.0;
+    offset = {0, 0};
+    m_panning = false;
+    m_movingWindow = false;
+    m_resizingWindow = false;
+    m_dragWindow = 0;
+
+    // Force relayout to snap windows back to tiling
+    auto mon = Desktop::focusState()->monitor();
+    if (mon)
+        g_layoutManager->recalculateMonitor(mon);
+
+    logf("[hypr-canvas] exited canvas mode, restored windows\n");
 }
 
-bool CCanvas::isTransformed() const {
-    return std::abs(zoom - 1.0) > 0.001
-        || std::abs(offset.x) > 0.5
-        || std::abs(offset.y) > 0.5;
+// --- Reposition all windows based on zoom+offset ---
+
+void CCanvas::repositionWindows() {
+    for (auto& w : g_pCompositor->m_windows) {
+        if (!w || w->isHidden() || !w->m_isMapped)
+            continue;
+
+        uint64_t id = (uint64_t)w.get();
+        auto it = m_savedStates.find(id);
+        if (it == m_savedStates.end())
+            continue;
+
+        const auto& saved = it->second;
+
+        // Canvas-to-screen: screenPos = (canvasPos - offset) * zoom
+        Vector2D newPos = {
+            (saved.canvasPos.x - offset.x) * zoom,
+            (saved.canvasPos.y - offset.y) * zoom
+        };
+        Vector2D newSize = {
+            saved.canvasSize.x * zoom,
+            saved.canvasSize.y * zoom
+        };
+
+        // Damage both the old and new geometry to avoid stale-size ghosts.
+        g_pHyprRenderer->damageWindow(w);
+        w->m_realPosition->setValueAndWarp(newPos);
+        w->m_realSize->setValueAndWarp(newSize);
+        w->m_position = newPos;
+        w->m_size = newSize;
+        g_pHyprRenderer->damageWindow(w);
+    }
 }
+
+// --- Zoom with cursor anchoring ---
 
 void CCanvas::applyZoom(double newZoom, const Vector2D& anchorScreen) {
-    const Vector2D anchorCanvas = screenToCanvas(anchorScreen);
+    // anchorScreen = point under cursor in screen coords
+    // Find what canvas point is under cursor: canvasPoint = offset + anchorScreen / zoom
+    const Vector2D anchorCanvas = {
+        offset.x + anchorScreen.x / zoom,
+        offset.y + anchorScreen.y / zoom
+    };
+
     zoom = std::clamp(newZoom, ZOOM_MIN, ZOOM_MAX);
-    offset = anchorCanvas - anchorScreen / zoom;
+
+    // Adjust offset so anchorCanvas stays under cursor:
+    // anchorScreen = (anchorCanvas - offset) * zoom
+    // offset = anchorCanvas - anchorScreen / zoom
+    offset = {
+        anchorCanvas.x - anchorScreen.x / zoom,
+        anchorCanvas.y - anchorScreen.y / zoom
+    };
+}
+
+void CCanvas::pan(const Vector2D& delta) {
+    offset.x += delta.x / zoom;
+    offset.y += delta.y / zoom;
 }

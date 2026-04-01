@@ -6,44 +6,63 @@
 #include <hyprland/src/devices/IPointer.hpp>
 #include <hyprutils/memory/SharedPtr.hpp>
 
+#include <map>
+
+// Saved window state for canvas mode
+struct SWindowState {
+    Vector2D restorePos;
+    Vector2D restoreSize;
+    Vector2D canvasPos;
+    Vector2D canvasSize;
+    bool     wasFloating;
+};
+
 class CCanvas {
   public:
     CCanvas();
     ~CCanvas();
 
-    // Viewport state
+    // Canvas state
     double   zoom   = 1.0;
-    Vector2D offset = {0, 0};
+    Vector2D offset = {0, 0};   // canvas-space offset of viewport origin
+    bool     active = false;     // canvas mode on/off
 
-    // Coordinate transforms
-    Vector2D screenToCanvas(const Vector2D& screen) const;
-    Vector2D canvasToScreen(const Vector2D& canvas) const;
-    bool     isTransformed() const;
+    // Saved window states (keyed by window address)
+    std::map<uint64_t, SWindowState> m_savedStates;
 
-    // Apply zoom with cursor anchoring
+    // Enter/exit canvas mode
+    void enter();
+    void exit();
+
+    // Apply zoom (cursor-anchored)
     void applyZoom(double newZoom, const Vector2D& anchorScreen);
 
+    // Pan by delta in screen pixels
+    void pan(const Vector2D& delta);
+
+    // Reposition all windows based on current zoom+offset
+    void repositionWindows();
+
     // Constants
-    static constexpr double ZOOM_MIN  = 0.05;
-    static constexpr double ZOOM_MAX  = 1.0;
-    static constexpr double ZOOM_STEP = 1.15;
+    static constexpr double ZOOM_MIN  = 0.1;
+    static constexpr double ZOOM_MAX  = 2.0;
+    static constexpr double ZOOM_STEP = 1.03;
+    static constexpr double PAN_STEP  = 120.0;
+    static constexpr double CANVAS_REF_W = 939.0;
+    static constexpr double CANVAS_REF_H = 1136.0;
+    static constexpr double MIN_WINDOW_W = 160.0;
+    static constexpr double MIN_WINDOW_H = 120.0;
 
     // Panning state
     bool m_panning = false;
+    bool m_movingWindow = false;
+    bool m_resizingWindow = false;
+    uint64_t m_dragWindow = 0;
 
-    // Function hooks (public for hook fn access)
-    CFunctionHook* m_mouseWheelHook        = nullptr;
-    CFunctionHook* m_mouseButtonHook       = nullptr;
-    CFunctionHook* m_mouseMovedHook        = nullptr;
-    CFunctionHook* m_positionHook          = nullptr;
-    CFunctionHook* m_closestValidHook     = nullptr;
-    CFunctionHook* m_monitorFromCursorHook  = nullptr;
-    CFunctionHook* m_monitorFromVectorHook  = nullptr;
-    CFunctionHook* m_popupPositionHook      = nullptr;
-    CFunctionHook* m_shouldRenderHook      = nullptr;
-    CFunctionHook* m_renderPassHook        = nullptr;
-    CFunctionHook* m_renderHook            = nullptr;
-    CFunctionHook* m_waylandToXWCoordHook  = nullptr;
+    // Hooks — only mouse input hooks needed (no render hooks!)
+    CFunctionHook* m_mouseWheelHook  = nullptr;
+    CFunctionHook* m_mouseButtonHook = nullptr;
+    CFunctionHook* m_mouseMovedHook  = nullptr;
 };
 
 inline std::unique_ptr<CCanvas> g_pCanvas;
