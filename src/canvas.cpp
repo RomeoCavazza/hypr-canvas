@@ -7,7 +7,6 @@
 #include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/managers/PointerManager.hpp>
 #include <hyprland/src/render/Renderer.hpp>
-#include <hyprland/src/render/Transformer.hpp>
 #include <hyprland/src/layout/LayoutManager.hpp>
 #include <hyprland/src/helpers/Monitor.hpp>
 
@@ -42,40 +41,6 @@ static void scheduleFrame() {
 
 // --- Forward typedefs ---
 using PHLWINDOW = SP<Desktop::View::CWindow>;
-
-class CCanvasWindowTransformer final : public IWindowTransformer {
-  public:
-    explicit CCanvasWindowTransformer(uint64_t id) : m_windowId(id) {}
-
-    SP<Render::IFramebuffer> transform(SP<Render::IFramebuffer> in) override {
-        return in;
-    }
-
-    void preWindowRender(CSurfacePassElement::SRenderData* data) override {
-        if (!data || !data->pWindow || !g_pCanvas || !g_pCanvas->active)
-            return;
-
-        if ((uint64_t)data->pWindow.get() != m_windowId)
-            return;
-
-        const auto it = g_pCanvas->m_savedStates.find(m_windowId);
-        if (it == g_pCanvas->m_savedStates.end() || it->second.pinned)
-            return;
-
-        const Vector2D visualPos = g_pCanvas->visualWindowPos(data->pWindow, it->second);
-        const Vector2D visualSize = g_pCanvas->visualWindowSize(data->pWindow, it->second);
-        data->pos = visualPos;
-        data->w = std::max(5.0, visualSize.x);
-        data->h = std::max(5.0, visualSize.y);
-    }
-
-  private:
-    uint64_t m_windowId = 0;
-};
-
-static bool isCanvasWindowTransformer(const UP<IWindowTransformer>& transformer) {
-    return dynamic_cast<CCanvasWindowTransformer*>(transformer.get()) != nullptr;
-}
 
 // --- Scroll/zoom hook ---
 
@@ -917,9 +882,7 @@ void CCanvas::enter() {
         g_pHyprRenderer->damageWindow(w);
 
         setWindowFloating(w, true);
-        attachWindowTransformer(w);
-
-        commitWindow(w, logicalWindowPos(state), logicalWindowSize(state), ECommitMode::Warp);
+        commitWindow(w, visualWindowPos(w, state), visualWindowSize(w, state), ECommitMode::Warp, zoom == 1.0);
         g_pHyprRenderer->damageWindow(w);
     }
 
@@ -1276,7 +1239,7 @@ void CCanvas::setWindowFloating(const SP<Desktop::View::CWindow>& window, bool f
         window->m_isFloating = floating;
 }
 
-void CCanvas::commitWindow(const SP<Desktop::View::CWindow>& window, const Vector2D& pos, const Vector2D& size, ECommitMode mode) const {
+void CCanvas::commitWindow(const SP<Desktop::View::CWindow>& window, const Vector2D& pos, const Vector2D& size, ECommitMode mode, bool notifyClient) const {
     if (!window)
         return;
 
@@ -1301,36 +1264,19 @@ void CCanvas::commitWindow(const SP<Desktop::View::CWindow>& window, const Vecto
         *window->m_realSize = size;
     }
 
-    if (sizeChanged)
+    if (notifyClient && sizeChanged)
         window->sendWindowSize();
 
     g_pHyprRenderer->damageWindow(window);
 }
 
 void CCanvas::attachWindowTransformer(const SP<Desktop::View::CWindow>& window) const {
-    if (!window)
-        return;
-
-    for (const auto& transformer : window->m_transformers) {
-        if (isCanvasWindowTransformer(transformer))
-            return;
-    }
-
-    window->m_transformers.emplace_back(makeUnique<CCanvasWindowTransformer>((uint64_t)window.get()));
 }
 
 void CCanvas::detachWindowTransformer(const SP<Desktop::View::CWindow>& window) const {
-    if (!window)
-        return;
-
-    window->m_transformers.erase(
-        std::remove_if(window->m_transformers.begin(), window->m_transformers.end(), isCanvasWindowTransformer),
-        window->m_transformers.end());
 }
 
 void CCanvas::detachAllWindowTransformers() const {
-    for (auto& w : g_pCompositor->m_windows)
-        detachWindowTransformer(w);
 }
 
 bool CCanvas::rendersAtNativeSize(const SP<Desktop::View::CWindow>& window) const {
@@ -1398,15 +1344,14 @@ SP<Desktop::View::CWindow> CCanvas::windowAtVisualPoint(const Vector2D& point) c
 
 Vector2D CCanvas::visualPointToLogicalPoint(const SP<Desktop::View::CWindow>& window, const SWindowState& state, const Vector2D& point) const {
     const CBox     visualBox   = visualWindowBox(window, state);
-    const Vector2D logicalPos  = logicalWindowPos(state);
     const Vector2D logicalSize = logicalWindowSize(state);
     const Vector2D visualSize  = visualBox.size();
 
     if (visualSize.x <= 0.0 || visualSize.y <= 0.0)
-        return logicalPos;
+        return visualBox.pos();
 
     const Vector2D visualLocal = point - visualBox.pos();
-    return logicalPos + Vector2D{
+    return visualBox.pos() + Vector2D{
         visualLocal.x * logicalSize.x / visualSize.x,
         visualLocal.y * logicalSize.y / visualSize.y,
     };
@@ -1428,9 +1373,9 @@ void CCanvas::repositionWindows(ECommitMode mode) {
         if (saved.pinned || w->m_pinned || isProtectedApp(w))
             continue;
 
-        // Keep client geometry logical. Zoom is a camera concern; explicit card
-        // resize is the only canvas action that should send a client resize.
-        commitWindow(w, logicalWindowPos(saved), logicalWindowSize(saved), mode);
+        // Move/scale the compositor box, but do not resize the client while
+        // panning or zooming the camera.
+        commitWindow(w, visualWindowPos(w, saved), visualWindowSize(w, saved), mode, false);
     }
     emitIPCEvent();
 }
@@ -1655,8 +1600,6 @@ void CCanvas::onWindowOpen(const SP<Desktop::View::CWindow>& w) {
 
     const bool originallyFloating = w->m_isFloating;
     setWindowFloating(w, true);
-    attachWindowTransformer(w);
-
     SWindowState state;
     state.restorePos = w->m_realPosition->value();
     state.restoreSize = w->m_realSize->value();

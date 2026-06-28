@@ -99,7 +99,7 @@ class CCanvas {
     void centerOnWindow(const SP<Desktop::View::CWindow>& window, ECommitMode mode);
     void focusWindow(const SP<Desktop::View::CWindow>& window) const;
     void setWindowFloating(const SP<Desktop::View::CWindow>& window, bool floating) const;
-    void commitWindow(const SP<Desktop::View::CWindow>& window, const Vector2D& pos, const Vector2D& size, ECommitMode mode) const;
+    void commitWindow(const SP<Desktop::View::CWindow>& window, const Vector2D& pos, const Vector2D& size, ECommitMode mode, bool notifyClient = true) const;
     void attachWindowTransformer(const SP<Desktop::View::CWindow>& window) const;
     void detachWindowTransformer(const SP<Desktop::View::CWindow>& window) const;
     void detachAllWindowTransformers() const;
