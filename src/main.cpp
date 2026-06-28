@@ -42,7 +42,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     g_pCanvas = std::make_unique<CCanvas>();
 
-    return {"hypr-canvas", "VXWM-style infinite canvas — physically moves windows", "Aaron+tco", "0.4.7"};
+    return {"hypr-canvas", "VXWM-style infinite canvas — physically moves windows", "Aaron+tco", "0.4.8"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

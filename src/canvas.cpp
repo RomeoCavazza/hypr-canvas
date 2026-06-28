@@ -639,10 +639,12 @@ CCanvas::CCanvas() {
             onWindowOpen(w);
     });
     m_openLayerListener = Event::bus()->m_events.layer.opened.listen([this](PHLLS) {
-        logf("[hypr-canvas] layer opened: ignored by canvas\n");
+        logf("[hypr-canvas] layer opened: reasserting canvas geometry\n");
+        requestReassert();
     });
     m_closeLayerListener = Event::bus()->m_events.layer.closed.listen([this](PHLLS) {
-        logf("[hypr-canvas] layer closed: ignored by canvas\n");
+        logf("[hypr-canvas] layer closed: reasserting canvas geometry\n");
+        requestReassert();
     });
     m_tickListener = Event::bus()->m_events.tick.listen([this]() {
         stabilizeAfterEvent();
@@ -922,6 +924,7 @@ void CCanvas::exit() {
     m_movingWindow = false;
     m_resizingWindow = false;
     m_dragWindow = 0;
+    m_pendingReassertFrames = 0;
     m_overviewActive = false;
     m_overviewSavedPos.clear();
 
@@ -1295,6 +1298,7 @@ void CCanvas::suspendForWorkspaceChange() {
     m_dragWindow = 0;
     m_pendingStabilize = false;
     m_pendingRefocus = false;
+    m_pendingReassertFrames = 0;
     m_overviewActive = false;
     m_overviewSavedPos.clear();
 
@@ -1335,6 +1339,9 @@ void CCanvas::forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabil
         m_dragWindow = 0;
     }
 
+    if (active && !wasManaged && (isProtectedApp(window) || windowOnCanvasWorkspace(window)))
+        requestReassert();
+
     if (!active || !wasManaged)
         return;
 
@@ -1359,14 +1366,21 @@ void CCanvas::requestStabilize(bool refocus) {
     m_pendingRefocus = m_pendingRefocus || refocus;
 }
 
-void CCanvas::stabilizeAfterEvent() {
-    if (!active || !m_pendingStabilize)
+void CCanvas::requestReassert(int frames) {
+    if (!active)
         return;
 
-    m_pendingStabilize = false;
+    m_pendingReassertFrames = std::max(m_pendingReassertFrames, frames);
+}
+
+void CCanvas::stabilizeAfterEvent() {
+    if (!active || (!m_pendingStabilize && m_pendingReassertFrames <= 0))
+        return;
 
     if (m_savedStates.empty()) {
+        m_pendingStabilize = false;
         m_pendingRefocus = false;
+        m_pendingReassertFrames = 0;
         m_overviewActive = false;
         m_overviewSavedPos.clear();
         persistWorkspaceState();
@@ -1374,20 +1388,30 @@ void CCanvas::stabilizeAfterEvent() {
         return;
     }
 
-    if (m_pendingRefocus) {
-        auto next = firstCanvasWindow();
-        if (next) {
-            centerOnWindow(next, ECommitMode::Animate);
-            focusWindow(next);
+    if (m_pendingStabilize) {
+        m_pendingStabilize = false;
+
+        if (m_pendingRefocus) {
+            auto next = firstCanvasWindow();
+            if (next) {
+                centerOnWindow(next, ECommitMode::Animate);
+                focusWindow(next);
+            } else {
+                repositionWindows(ECommitMode::Animate);
+            }
         } else {
             repositionWindows(ECommitMode::Animate);
         }
-    } else {
-        repositionWindows(ECommitMode::Animate);
+
+        m_pendingRefocus = false;
+        persistWorkspaceState();
     }
 
-    m_pendingRefocus = false;
-    persistWorkspaceState();
+    if (m_pendingReassertFrames > 0) {
+        --m_pendingReassertFrames;
+        repositionWindows(ECommitMode::Warp);
+    }
+
     scheduleFrame();
     emitIPCEvent(true);
 }
@@ -1428,7 +1452,12 @@ void CCanvas::pan(const Vector2D& delta) {
 void CCanvas::onWindowOpen(const SP<Desktop::View::CWindow>& w) {
     if (!active || !w) return;
 
-    if (isProtectedApp(w) || w->isHidden() || !windowOnCanvasWorkspace(w))
+    if (isProtectedApp(w)) {
+        requestReassert();
+        return;
+    }
+
+    if (w->isHidden() || !windowOnCanvasWorkspace(w))
         return;
 
     uint64_t id = (uint64_t)w.get();
