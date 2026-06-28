@@ -75,21 +75,41 @@ Mouse controls:
 - In canvas mode, `SUPER + left drag` on a canvas window moves that card.
 - In canvas mode, `SUPER + right drag` on a canvas window resizes that card.
 
-## Build
+## Installation
 
-Requires Hyprland development headers matching the running compositor.
+### Nix Flake (Recommended for NixOS)
+
+Add `hypr-canvas` to your flake inputs:
+
+```nix
+inputs.hypr-canvas.url = "github:RomeoCavazza/hypr-canvas";
+```
+
+Include the plugin in your Hyprland configuration (e.g., via Home Manager):
+
+```nix
+wayland.windowManager.hyprland.plugins = [
+  inputs.hypr-canvas.packages.${pkgs.system}.default
+];
+```
+
+### hyprpm
+
+```sh
+hyprpm add https://github.com/RomeoCavazza/hypr-canvas
+hyprpm enable hyprcanvas
+```
+
+### Manual Build
+
+Requires Hyprland development headers matching the running compositor (v0.55.4).
 
 ```sh
 make
-```
-
-Load manually:
-
-```sh
 hyprctl plugin load "$PWD/hypr-canvas.so"
 ```
 
-Or configure Hyprland:
+Or configure directly in `hyprland.conf`:
 
 ```conf
 plugin = /absolute/path/to/hypr-canvas.so
