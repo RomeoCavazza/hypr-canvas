@@ -1,2 +1,6 @@
 *.so
 .claude/
+.gemini/
+.antigravity/
+result
+result-*

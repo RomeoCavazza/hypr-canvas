@@ -303,19 +303,7 @@ SDispatchResult dispatchReset(std::string args) {
     return {};
 }
 
-SDispatchResult dispatchHome(std::string args) {
-    if (!g_pCanvas)
-        return {};
 
-    if (g_pCanvas->workspaceChanged())
-        g_pCanvas->resetForWorkspaceChange();
-
-    g_pCanvas->ensureActive();
-    g_pCanvas->home(ECommitMode::Animate);
-    logf("[hypr-canvas] home (reset viewport to active window, zoom 1.0)\n");
-    scheduleFrame();
-    return {};
-}
 
 SDispatchResult dispatchCenter(std::string args) {
     if (!g_pCanvas)
@@ -509,11 +497,39 @@ static CFunctionHook* hookByName(const std::string& name, void* dest) {
 
 bool CCanvas::isProtectedApp(const SP<Desktop::View::CWindow>& window) const {
     if (!window) return false;
-    std::string protectedApps = getCfgString("plugin:canvas:protected_apps", "");
-    if (protectedApps.empty()) return false;
 
     std::string classname = window->m_class;
     std::string title = window->m_title;
+
+    // Helper lambda for case-insensitive substring search
+    auto contains = [](const std::string& str, const std::string& sub) {
+        auto it = std::search(
+            str.begin(), str.end(),
+            sub.begin(), sub.end(),
+            [](char ch1, char ch2) { return std::tolower(ch1) == std::tolower(ch2); }
+        );
+        return it != str.end();
+    };
+
+    // Auto-exclude overlays, launchers, lockscreens, sharing pickers, panels, screenshot tools, and portal popups
+    if (contains(classname, "rofi") ||
+        contains(classname, "slurp") ||
+        contains(classname, "grim") ||
+        contains(classname, "waybar") ||
+        contains(classname, "pinentry") ||
+        contains(classname, "polkit") ||
+        contains(classname, "share-picker") ||
+        contains(classname, "portal") ||
+        contains(classname, "lock") ||
+        contains(classname, "screenshot") ||
+        contains(classname, "hyprspace") ||
+        contains(title, "rofi") ||
+        contains(title, "screenshot")) {
+        return true;
+    }
+
+    std::string protectedApps = getCfgString("plugin:canvas:protected_apps", "");
+    if (protectedApps.empty()) return false;
 
     std::stringstream ss(protectedApps);
     std::string token;
@@ -812,10 +828,7 @@ Vector2D CCanvas::monitorCenter() const {
 }
 
 
-void CCanvas::home(ECommitMode mode) {
-    zoom = 1.0;
-    centerActive(mode);
-}
+
 
 void CCanvas::centerActive(ECommitMode mode) {
     centerOnWindow(activeCanvasWindow(), mode);
@@ -1199,63 +1212,66 @@ SDispatchResult dispatchOverview(std::string args) {
             return {};
         }
 
-        // Sort left-to-right by original X for stable, intuitive order
+        // Sort windows by area descending (largest first) to put the largest in the center
         std::sort(entries.begin(), entries.end(), [](const WEntry& a, const WEntry& b) {
-            return a.origPos.x < b.origPos.x;
+            return (a.size.x * a.size.y) > (b.size.x * b.size.y);
         });
 
         // Tight gap between windows
         constexpr double GAP = 18.0;
 
-        // Max row width ≈ viewport width in canvas space (no zoom change)
-        auto mon = Desktop::focusState()->monitor();
-        const double maxRowWidth = mon
-            ? (mon->m_size.x / g_pCanvas->zoom) * 0.92
-            : 2400.0;
-
-        // Greedy Masonry + Deterministic Jitter layout
-        double maxW = 0.0;
+        // Find max dimensions for clean grid packing
+        double maxW = 0.0, maxH = 0.0;
         for (auto& e : entries) {
             maxW = std::max(maxW, e.size.x);
+            maxH = std::max(maxH, e.size.y);
         }
         if (maxW <= 0.0) maxW = CCanvas::CANVAS_REF_W;
+        if (maxH <= 0.0) maxH = CCanvas::CANVAS_REF_H;
 
-        int numCols = std::max(2, (int)((maxRowWidth + GAP) / (maxW + GAP)));
-        std::vector<double> colHeights(numCols, 0.0);
+        // Generate spiral grid positions
+        struct GridPos { int col; int row; };
+        std::vector<GridPos> spiral;
+        int spiralCol = 0, spiralRow = 0;
+        int dCol = 0, dRow = -1;
+        for (size_t step = 0; step < entries.size() * 4 + 10; ++step) {
+            spiral.push_back({spiralCol, spiralRow});
+            if (spiralCol == spiralRow || (spiralCol < 0 && spiralCol == -spiralRow) || (spiralCol > 0 && spiralCol == 1 - spiralRow)) {
+                int temp = dCol;
+                dCol = -dRow;
+                dRow = temp;
+            }
+            spiralCol += dCol;
+            spiralRow += dRow;
+        }
 
         struct Placement { uint64_t id; Vector2D pos; };
         std::vector<Placement> placements;
 
-        for (auto& e : entries) {
-            // Find column with minimum height
-            int minCol = 0;
-            for (int i = 1; i < numCols; ++i) {
-                if (colHeights[i] < colHeights[minCol]) {
-                    minCol = i;
-                }
-            }
+        double minX = 999999.0, maxX = -999999.0;
+        double minY = 999999.0, maxY = -999999.0;
 
-            // Determine X/Y of placement (no jitter to prevent overlaps, ensuring strict GAP on all sides)
-            double posX = minCol * (maxW + GAP);
-            double posY = colHeights[minCol];
+        for (size_t i = 0; i < entries.size(); ++i) {
+            auto& e = entries[i];
+            double posX = spiral[i].col * (maxW + GAP);
+            double posY = spiral[i].row * (maxH + GAP);
+
+            minX = std::min(minX, posX);
+            maxX = std::max(maxX, posX + e.size.x);
+            minY = std::min(minY, posY);
+            maxY = std::max(maxY, posY + e.size.y);
 
             placements.push_back({ e.id, { posX, posY } });
-
-            // Update column height based on actual placed boundary plus GAP
-            colHeights[minCol] = posY + e.size.y + GAP;
         }
 
-        double totalW = numCols * maxW + (numCols - 1) * GAP;
-        double totalH = 0.0;
-        for (double h : colHeights) {
-            totalH = std::max(totalH, h - GAP);
-        }
+        double totalW = maxX - minX;
+        double totalH = maxY - minY;
 
         // Center the cluster around the current viewport center in canvas space
         const Vector2D viewportCenter = g_pCanvas->screenToCanvas(g_pCanvas->monitorCenter());
         const Vector2D clusterOrigin  = {
-            viewportCenter.x - totalW / 2.0,
-            viewportCenter.y - totalH / 2.0
+            viewportCenter.x - (minX + maxX) / 2.0,
+            viewportCenter.y - (minY + maxY) / 2.0
         };
 
         // Assign new positions

@@ -60,7 +60,7 @@ class CCanvas {
     // Pan by delta in screen pixels
     void pan(const Vector2D& delta);
 
-    void home(ECommitMode mode);
+
     void centerActive(ECommitMode mode);
     void nav(const std::string& direction);
     void togglePin();

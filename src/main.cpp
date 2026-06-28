@@ -9,7 +9,6 @@ extern SDispatchResult dispatchToggle(std::string args);
 extern SDispatchResult dispatchEnter(std::string args);
 extern SDispatchResult dispatchExit(std::string args);
 extern SDispatchResult dispatchReset(std::string args);
-extern SDispatchResult dispatchHome(std::string args);
 extern SDispatchResult dispatchCenter(std::string args);
 extern SDispatchResult dispatchNav(std::string args);
 extern SDispatchResult dispatchPan(std::string args);
@@ -25,7 +24,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:enter",    dispatchEnter);
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:exit",     dispatchExit);
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:reset",    dispatchReset);
-    HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:home",     dispatchHome);
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:center",   dispatchCenter);
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:nav",      dispatchNav);
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:pan",      dispatchPan);
