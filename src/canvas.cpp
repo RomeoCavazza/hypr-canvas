@@ -22,18 +22,28 @@
 static int getCfgInt(const std::string &key, int fallback) {
     if (!PHANDLE) return fallback;
     auto *cv = HyprlandAPI::getConfigValue(PHANDLE, key);
-    if (!cv || !cv->dataPtr())
-        return fallback;
-    return *static_cast<Hyprlang::INT *>(cv->dataPtr());
+    if (!cv) return fallback;
+    try {
+        auto val = cv->getValue();
+        if (val.has_value()) {
+            return std::any_cast<Hyprlang::INT>(val);
+        }
+    } catch (...) {}
+    return fallback;
 }
 
 static std::string getCfgString(const std::string &key, const std::string &fallback) {
     if (!PHANDLE) return fallback;
     auto *cv = HyprlandAPI::getConfigValue(PHANDLE, key);
-    if (!cv || !cv->dataPtr())
-        return fallback;
-    const auto* str = static_cast<Hyprlang::STRING *>(cv->dataPtr());
-    return str && *str ? std::string{*str} : fallback;
+    if (!cv) return fallback;
+    try {
+        auto val = cv->getValue();
+        if (val.has_value()) {
+            auto s = std::any_cast<Hyprlang::STRING>(val);
+            if (s) return std::string{s};
+        }
+    } catch (...) {}
+    return fallback;
 }
 
 static void logf(const char* fmt, ...) {
@@ -494,8 +504,8 @@ bool CCanvas::isProtectedApp(const SP<Desktop::View::CWindow>& window) const {
     std::string protectedApps = getCfgString("plugin:canvas:protected_apps", "");
     if (protectedApps.empty()) return false;
 
-    std::string classname = window->m_initialClass;
-    std::string title = window->m_initialTitle;
+    std::string classname = window->m_class;
+    std::string title = window->m_title;
 
     std::stringstream ss(protectedApps);
     std::string token;
