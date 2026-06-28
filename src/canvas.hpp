@@ -8,6 +8,7 @@
 #include <hyprland/src/managers/EventManager.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/helpers/signal/Signal.hpp>
+#include <hyprland/src/config/values/ConfigValues.hpp>
 #include <hyprutils/memory/SharedPtr.hpp>
 
 #include <chrono>
@@ -154,3 +155,7 @@ class CCanvas {
 
 inline std::unique_ptr<CCanvas> g_pCanvas;
 inline HANDLE                   PHANDLE = nullptr;
+
+inline SP<Config::Values::String> g_pCfgProtectedApps;
+inline SP<Config::Values::Int>    g_pCfgDebug;
+inline SP<Config::Values::Int>    g_pCfgNavCooldown;

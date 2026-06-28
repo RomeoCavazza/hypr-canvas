@@ -36,13 +36,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:float",    dispatchFloat);
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:overview", dispatchOverview);
 
-    HyprlandAPI::addConfigValue(PHANDLE, "plugin:canvas:protected_apps", Hyprlang::STRING{(char*)""});
-    HyprlandAPI::addConfigValue(PHANDLE, "plugin:canvas:debug", Hyprlang::INT{0});
-    HyprlandAPI::addConfigValue(PHANDLE, "plugin:canvas:nav_cooldown_ms", Hyprlang::INT{150});
+    g_pCfgProtectedApps = Config::Values::makeConfigValue<Config::Values::String>("plugin:canvas:protected_apps", "Protected window class substrings", "", {});
+    g_pCfgDebug         = Config::Values::makeConfigValue<Config::Values::Int>("plugin:canvas:debug", "Enable debug logging", 0, {});
+    g_pCfgNavCooldown   = Config::Values::makeConfigValue<Config::Values::Int>("plugin:canvas:nav_cooldown_ms", "Navigation cooldown in ms", 150, {});
+
+    HyprlandAPI::addConfigValueV2(PHANDLE, g_pCfgProtectedApps);
+    HyprlandAPI::addConfigValueV2(PHANDLE, g_pCfgDebug);
+    HyprlandAPI::addConfigValueV2(PHANDLE, g_pCfgNavCooldown);
 
     g_pCanvas = std::make_unique<CCanvas>();
 
-    return {"hypr-canvas", "VXWM-style infinite canvas — physically moves windows", "Aaron+tco", "0.4.9"};
+    return {"hypr-canvas", "VXWM-style infinite canvas — physically moves windows", "Aaron+tco", "1.0.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

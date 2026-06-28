@@ -20,35 +20,8 @@
 #include <vector>
 #include <linux/input-event-codes.h>
 
-static int getCfgInt(const std::string &key, int fallback) {
-    if (!PHANDLE) return fallback;
-    auto *cv = HyprlandAPI::getConfigValue(PHANDLE, key);
-    if (!cv) return fallback;
-    try {
-        auto val = cv->getValue();
-        if (val.has_value()) {
-            return std::any_cast<Hyprlang::INT>(val);
-        }
-    } catch (...) {}
-    return fallback;
-}
-
-static std::string getCfgString(const std::string &key, const std::string &fallback) {
-    if (!PHANDLE) return fallback;
-    auto *cv = HyprlandAPI::getConfigValue(PHANDLE, key);
-    if (!cv) return fallback;
-    try {
-        auto val = cv->getValue();
-        if (val.has_value()) {
-            auto s = std::any_cast<Hyprlang::STRING>(val);
-            if (s) return std::string{s};
-        }
-    } catch (...) {}
-    return fallback;
-}
-
 static void logf(const char* fmt, ...) {
-    if (getCfgInt("plugin:canvas:debug", 0) == 0) return;
+    if (!g_pCfgDebug || g_pCfgDebug->value() == 0) return;
     FILE* f = fopen("/tmp/hypr-canvas.log", "a");
     if (!f) return;
     va_list args;
@@ -576,7 +549,7 @@ bool CCanvas::isProtectedApp(const SP<Desktop::View::CWindow>& window) const {
         return true;
     }
 
-    std::string protectedApps = getCfgString("plugin:canvas:protected_apps", "");
+    std::string protectedApps = g_pCfgProtectedApps ? g_pCfgProtectedApps->value() : "";
     if (protectedApps.empty()) return false;
 
     std::stringstream ss(protectedApps);
@@ -979,7 +952,7 @@ void CCanvas::nav(const std::string& direction) {
     if (!active)
         return;
 
-    int cooldownMs = getCfgInt("plugin:canvas:nav_cooldown_ms", 150);
+    int cooldownMs = g_pCfgNavCooldown ? (int)g_pCfgNavCooldown->value() : 150;
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastNavTime).count();
     if (elapsed < cooldownMs) {
