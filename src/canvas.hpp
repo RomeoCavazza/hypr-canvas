@@ -30,6 +30,13 @@ struct SWindowState {
     bool     pinned = false;
 };
 
+struct SWorkspaceCanvasState {
+    std::map<uint64_t, SWindowState> savedStates;
+    double zoom = 1.0;
+    Vector2D offset = {0, 0};
+    bool overviewActive = false;
+};
+
 class CCanvas {
   public:
     CCanvas();
@@ -43,6 +50,9 @@ class CCanvas {
 
     // Saved window states (keyed by window address)
     std::map<uint64_t, SWindowState> m_savedStates;
+
+    // Workspace-specific canvas configurations (for shape memory)
+    std::map<WORKSPACEID, SWorkspaceCanvasState> m_workspaceStates;
 
     // Enter/exit canvas mode
     void enter();
@@ -115,6 +125,7 @@ class CCanvas {
     CHyprSignalListener m_destroyWindowListener;
     CHyprSignalListener m_closeWindowListener;
     CHyprSignalListener m_openWindowListener;
+    CHyprSignalListener m_workspaceActiveListener;
     CHyprSignalListener m_swipeBeginListener;
     CHyprSignalListener m_swipeUpdateListener;
     CHyprSignalListener m_swipeEndListener;

@@ -573,14 +573,30 @@ CCanvas::CCanvas() {
 
     m_destroyWindowListener = Event::bus()->m_events.window.destroy.listen([this](PHLWINDOW w) {
         if (!w) return;
-        m_savedStates.erase((uint64_t)w.get());
+        uint64_t id = (uint64_t)w.get();
+        m_savedStates.erase(id);
+        for (auto& [wsId, wsState] : m_workspaceStates) {
+            wsState.savedStates.erase(id);
+        }
     });
     m_closeWindowListener = Event::bus()->m_events.window.close.listen([this](PHLWINDOW w) {
         if (!w) return;
-        m_savedStates.erase((uint64_t)w.get());
+        uint64_t id = (uint64_t)w.get();
+        m_savedStates.erase(id);
+        for (auto& [wsId, wsState] : m_workspaceStates) {
+            wsState.savedStates.erase(id);
+        }
     });
     m_openWindowListener = Event::bus()->m_events.window.open.listen([this](PHLWINDOW w) {
         onWindowOpen(w);
+    });
+    m_workspaceActiveListener = Event::bus()->m_events.workspace.active.listen([this](PHLWORKSPACE ws) {
+        if (!ws) return;
+        if (active && ws->m_id != m_canvasWorkspace) {
+            logf("[hypr-canvas] workspace switched (active on %ld, switched to %ld), auto-exiting canvas on old workspace\n",
+                 (long)m_canvasWorkspace, (long)ws->m_id);
+            exit();
+        }
     });
 
     m_swipeBeginListener = Event::bus()->m_events.gesture.swipe.begin.listen([this](IPointer::SSwipeBeginEvent e, Event::SCallbackInfo& info) {
@@ -659,14 +675,17 @@ void CCanvas::enter() {
     };
 
     active = true;
-    zoom = 1.0;
-    offset = {0, 0};
     m_canvasWorkspace = mon->activeWorkspaceID();
-    m_savedStates.clear();
     m_panning = false;
     m_movingWindow = false;
     m_resizingWindow = false;
     m_dragWindow = 0;
+
+    // Fetch or initialize workspace state (shape memory)
+    auto& wsState = m_workspaceStates[m_canvasWorkspace];
+    zoom = wsState.zoom;
+    offset = wsState.offset;
+    m_overviewActive = wsState.overviewActive;
 
     std::vector<SEntry> entries;
     std::vector<size_t> tiledEntries;
@@ -689,6 +708,26 @@ void CCanvas::enter() {
 
         entries.push_back(entry);
     }
+
+    // Remove any windows from wsState.savedStates that are no longer on the workspace
+    for (auto it = wsState.savedStates.begin(); it != wsState.savedStates.end(); ) {
+        uint64_t id = it->first;
+        bool found = false;
+        for (const auto& entry : entries) {
+            if (entry.id == id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            it = wsState.savedStates.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // Now populate m_savedStates from wsState.savedStates
+    m_savedStates = wsState.savedStates;
 
     std::sort(tiledEntries.begin(), tiledEntries.end(), [&](size_t a, size_t b) {
         const auto& ca = entries[a].center;
@@ -714,37 +753,45 @@ void CCanvas::enter() {
     for (auto& entry : entries) {
         auto& w = entry.window;
 
-        SWindowState state;
-        state.restorePos  = entry.currentPos;
-        state.restoreSize = entry.currentSize;
-        state.wasFloating = entry.wasFloating;
-        state.pinned      = (w->m_pinned || isProtectedApp(w));
-
-        if (state.pinned) {
-            state.canvasPos  = entry.currentPos;
-            state.canvasSize = entry.currentSize;
-            m_savedStates[entry.id] = state;
-            continue;
-        }
-
-        if (entry.wasFloating) {
-            state.canvasPos  = entry.currentPos;
-            state.canvasSize = entry.currentSize;
+        if (m_savedStates.contains(entry.id)) {
+            auto& saved = m_savedStates[entry.id];
+            saved.restorePos = entry.currentPos;
+            saved.restoreSize = entry.currentSize;
+            saved.wasFloating = entry.wasFloating;
+            saved.pinned = (w->m_pinned || isProtectedApp(w));
         } else {
-            auto it = std::find(tiledEntries.begin(), tiledEntries.end(), (size_t)(&entry - entries.data()));
-            const double rank = it == tiledEntries.end() ? 0.0 : (double)std::distance(tiledEntries.begin(), it) - (double)focusedTiledIndex;
-            const Vector2D cardCenter = {
-                baseCenter.x + rank * stride,
-                baseCenter.y,
-            };
+            SWindowState state;
+            state.restorePos  = entry.currentPos;
+            state.restoreSize = entry.currentSize;
+            state.wasFloating = entry.wasFloating;
+            state.pinned      = (w->m_pinned || isProtectedApp(w));
 
-            state.canvasSize = {CANVAS_REF_W, CANVAS_REF_H};
-            state.canvasPos = {
-                cardCenter.x - state.canvasSize.x / 2.0,
-                cardCenter.y - state.canvasSize.y / 2.0
-            };
+            if (state.pinned) {
+                state.canvasPos  = entry.currentPos;
+                state.canvasSize = entry.currentSize;
+            } else if (entry.wasFloating) {
+                state.canvasPos  = entry.currentPos;
+                state.canvasSize = entry.currentSize;
+            } else {
+                auto it = std::find(tiledEntries.begin(), tiledEntries.end(), (size_t)(&entry - entries.data()));
+                const double rank = it == tiledEntries.end() ? 0.0 : (double)std::distance(tiledEntries.begin(), it) - (double)focusedTiledIndex;
+                const Vector2D cardCenter = {
+                    baseCenter.x + rank * stride,
+                    baseCenter.y,
+                };
+
+                state.canvasSize = {CANVAS_REF_W, CANVAS_REF_H};
+                state.canvasPos = {
+                    cardCenter.x - state.canvasSize.x / 2.0,
+                    cardCenter.y - state.canvasSize.y / 2.0
+                };
+            }
+            m_savedStates[entry.id] = state;
         }
-        m_savedStates[entry.id] = state;
+
+        const auto& state = m_savedStates[entry.id];
+        if (state.pinned)
+            continue;
 
         g_pHyprRenderer->damageWindow(w);
 
@@ -752,16 +799,26 @@ void CCanvas::enter() {
             w->m_isFloating = true;
         }
 
-        commitWindow(w, state.canvasPos, state.canvasSize, ECommitMode::Warp);
+        Vector2D screenPos = (state.canvasPos - offset) * zoom;
+        Vector2D screenSize = state.canvasSize * zoom;
+        commitWindow(w, screenPos, screenSize, ECommitMode::Warp);
         g_pHyprRenderer->damageWindow(w);
     }
 
-    logf("[hypr-canvas] entered canvas mode on workspace %ld, saved %zu windows\n",
+    logf("[hypr-canvas] entered canvas mode on workspace %ld, saved/restored %zu windows\n",
          (long)m_canvasWorkspace, m_savedStates.size());
     emitIPCEvent(true);
 }
 
 void CCanvas::exit() {
+    // Save current layout to workspace configurations before restoring layout settings
+    SWorkspaceCanvasState wsState;
+    wsState.savedStates = m_savedStates;
+    wsState.zoom = zoom;
+    wsState.offset = offset;
+    wsState.overviewActive = m_overviewActive;
+    m_workspaceStates[m_canvasWorkspace] = wsState;
+
     // Restore all saved window positions and float state
     for (auto& w : g_pCompositor->m_windows) {
         if (!w || w->isHidden() || !w->m_isMapped || !windowOnCanvasWorkspace(w))
@@ -1220,48 +1277,99 @@ SDispatchResult dispatchOverview(std::string args) {
         // Tight gap between windows
         constexpr double GAP = 18.0;
 
-        // Find max dimensions for clean grid packing
-        double maxW = 0.0, maxH = 0.0;
-        for (auto& e : entries) {
-            maxW = std::max(maxW, e.size.x);
-            maxH = std::max(maxH, e.size.y);
-        }
-        if (maxW <= 0.0) maxW = CCanvas::CANVAS_REF_W;
-        if (maxH <= 0.0) maxH = CCanvas::CANVAS_REF_H;
+        struct Placed {
+            uint64_t id;
+            Vector2D pos;
+            Vector2D size;
+        };
+        std::vector<Placed> placed;
 
-        // Generate spiral grid positions
-        struct GridPos { int col; int row; };
-        std::vector<GridPos> spiral;
-        int spiralCol = 0, spiralRow = 0;
-        int dCol = 0, dRow = -1;
-        for (size_t step = 0; step < entries.size() * 4 + 10; ++step) {
-            spiral.push_back({spiralCol, spiralRow});
-            if (spiralCol == spiralRow || (spiralCol < 0 && spiralCol == -spiralRow) || (spiralCol > 0 && spiralCol == 1 - spiralRow)) {
-                int temp = dCol;
-                dCol = -dRow;
-                dRow = temp;
+        // Helper to check overlap
+        auto overlaps = [&](const Vector2D& pos, const Vector2D& size) {
+            for (const auto& p : placed) {
+                // Check intersection with small epsilon to avoid float inaccuracies
+                bool intersects = !(pos.x + size.x + GAP - 0.1 <= p.pos.x ||
+                                    p.pos.x + p.size.x + GAP - 0.1 <= pos.x ||
+                                    pos.y + size.y + GAP - 0.1 <= p.pos.y ||
+                                    p.pos.y + p.size.y + GAP - 0.1 <= pos.y);
+                if (intersects) return true;
             }
-            spiralCol += dCol;
-            spiralRow += dRow;
-        }
+            return false;
+        };
 
-        struct Placement { uint64_t id; Vector2D pos; };
-        std::vector<Placement> placements;
+        // Center of the first (largest) window as the target center
+        Vector2D targetCenter = {0, 0};
 
         double minX = 999999.0, maxX = -999999.0;
         double minY = 999999.0, maxY = -999999.0;
 
         for (size_t i = 0; i < entries.size(); ++i) {
             auto& e = entries[i];
-            double posX = spiral[i].col * (maxW + GAP);
-            double posY = spiral[i].row * (maxH + GAP);
+            if (i == 0) {
+                // Place the largest window at (0,0)
+                placed.push_back({ e.id, {0, 0}, e.size });
+                targetCenter = e.size / 2.0;
+                minX = 0;
+                maxX = e.size.x;
+                minY = 0;
+                maxY = e.size.y;
+                continue;
+            }
 
-            minX = std::min(minX, posX);
-            maxX = std::max(maxX, posX + e.size.x);
-            minY = std::min(minY, posY);
-            maxY = std::max(maxY, posY + e.size.y);
+            // Find best candidate position
+            Vector2D bestPos = {0, 0};
+            double bestDist = std::numeric_limits<double>::max();
+            bool found = false;
 
-            placements.push_back({ e.id, { posX, posY } });
+            // Helper to evaluate a candidate position
+            auto evalCandidate = [&](const Vector2D& cand) {
+                if (overlaps(cand, e.size)) return;
+                Vector2D candCenter = cand + e.size / 2.0;
+                double dist = candCenter.distance(targetCenter);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestPos = cand;
+                    found = true;
+                }
+            };
+
+            for (const auto& p : placed) {
+                // 1. Right of p
+                double rx = p.pos.x + p.size.x + GAP;
+                evalCandidate({ rx, p.pos.y }); // Align top
+                evalCandidate({ rx, p.pos.y + (p.size.y - e.size.y) / 2.0 }); // Align center
+                evalCandidate({ rx, p.pos.y + p.size.y - e.size.y }); // Align bottom
+
+                // 2. Left of p
+                double lx = p.pos.x - (e.size.x + GAP);
+                evalCandidate({ lx, p.pos.y }); // Align top
+                evalCandidate({ lx, p.pos.y + (p.size.y - e.size.y) / 2.0 }); // Align center
+                evalCandidate({ lx, p.pos.y + p.size.y - e.size.y }); // Align bottom
+
+                // 3. Bottom of p
+                double by = p.pos.y + p.size.y + GAP;
+                evalCandidate({ p.pos.x, by }); // Align left
+                evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, by }); // Align center
+                evalCandidate({ p.pos.x + p.size.x - e.size.x, by }); // Align right
+
+                // 4. Top of p
+                double ty = p.pos.y - (e.size.y + GAP);
+                evalCandidate({ p.pos.x, ty }); // Align left
+                evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, ty }); // Align center
+                evalCandidate({ p.pos.x + p.size.x - e.size.x, ty }); // Align right
+            }
+
+            if (!found) {
+                // Fallback: place it somewhere safe (e.g. far right)
+                bestPos = { (placed.back().pos.x + placed.back().size.x + GAP), 0.0 };
+            }
+
+            minX = std::min(minX, bestPos.x);
+            maxX = std::max(maxX, bestPos.x + e.size.x);
+            minY = std::min(minY, bestPos.y);
+            maxY = std::max(maxY, bestPos.y + e.size.y);
+
+            placed.push_back({ e.id, bestPos, e.size });
         }
 
         double totalW = maxX - minX;
@@ -1275,7 +1383,7 @@ SDispatchResult dispatchOverview(std::string args) {
         };
 
         // Assign new positions
-        for (auto& p : placements) {
+        for (auto& p : placed) {
             auto it = g_pCanvas->m_savedStates.find(p.id);
             if (it != g_pCanvas->m_savedStates.end())
                 it->second.canvasPos = clusterOrigin + p.pos;
