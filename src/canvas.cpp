@@ -85,22 +85,22 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
             if (!g_pCanvas->active)
                 g_pCanvas->enter();
 
-            const double zoomFactor = std::pow(CCanvas::ZOOM_STEP, std::abs(scrollDelta));
+            const double steps = (e.deltaDiscrete != 0) ? (double)e.deltaDiscrete / 120.0 : e.delta / 15.0;
+            const double zoomFactor = std::pow(1.10, std::abs(steps));
             double       newZoom    = g_pCanvas->zoom;
             if (scrollDelta < 0)
                 newZoom *= zoomFactor;
             else
                 newZoom /= zoomFactor;
 
-            // Center-anchored zoom feels more like a desktop camera than a drag.
+            // Cursor-anchored zoom for natural canvas navigation
             auto mon = Desktop::focusState()->monitor();
             if (!mon)
                 return;
 
-            const auto monSize = mon->m_transformedSize;
-            const Vector2D center = {monSize.x / 2.0, monSize.y / 2.0};
+            const Vector2D cursorCoords = g_pInputManager->getMouseCoordsInternal();
 
-            g_pCanvas->applyZoom(newZoom, center);
+            g_pCanvas->applyZoom(newZoom, cursorCoords);
             g_pCanvas->repositionWindows(ECommitMode::Warp);
 
             logf("[hypr-canvas] zoom=%.3f offset=(%.1f, %.1f)\n",
@@ -354,6 +354,13 @@ SDispatchResult dispatchCenter(std::string args) {
     return {};
 }
 
+
+
+// --- canvas:nav -----------------------------------------------------------
+// Context-aware arrows:
+//   canvas inactive → delegate to Hyprland movefocus (tiled navigation)
+//   canvas active   → navigate window focus (directional focus + centering)
+// -------------------------------------------------------------------------
 SDispatchResult dispatchNav(std::string args) {
     if (!g_pCanvas)
         return {};
@@ -361,26 +368,42 @@ SDispatchResult dispatchNav(std::string args) {
     if (g_pCanvas->workspaceChanged())
         g_pCanvas->resetForWorkspaceChange();
 
-    auto preferred = Desktop::focusState()->window();
+    // Map arg → movefocus direction
+    std::string mfDir;
+    if      (args == "left")  mfDir = "l";
+    else if (args == "right") mfDir = "r";
+    else if (args == "up")    mfDir = "u";
+    else if (args == "down")  mfDir = "d";
+    else return {};
 
-    g_pCanvas->ensureActive();
+    if (!g_pCanvas->active) {
+        // Tiled mode: forward to native movefocus
+        auto it = g_pKeybindManager->m_dispatchers.find("movefocus");
+        if (it != g_pKeybindManager->m_dispatchers.end())
+            it->second(mfDir);
+        return {};
+    }
 
-    if (preferred && g_pCanvas->windowOnCanvasWorkspace(preferred) &&
-        g_pCanvas->m_savedStates.contains((uint64_t)preferred.get()))
-        g_pCanvas->focusWindow(preferred);
-
+    // Canvas mode: navigate window focus in the specified direction
     g_pCanvas->nav(args);
-    logf("[hypr-canvas] nav %s\n", args.c_str());
     scheduleFrame();
     return {};
 }
 
+// --- canvas:pan ------------------------------------------------------------
+// Explicit camera pan — only operates when canvas is already active.
+// Does NOT auto-enter canvas (use canvas:toggle for that).
+// -------------------------------------------------------------------------
 SDispatchResult dispatchPan(std::string args) {
     if (!g_pCanvas)
         return {};
 
     if (g_pCanvas->workspaceChanged())
         g_pCanvas->resetForWorkspaceChange();
+
+    // Guard: don't pull windows into canvas mode on an accidental nudge
+    if (!g_pCanvas->active)
+        return {};
 
     Vector2D delta = {0, 0};
     if (args == "left")       delta.x = CCanvas::PAN_STEP;
@@ -389,9 +412,6 @@ SDispatchResult dispatchPan(std::string args) {
     else if (args == "down")  delta.y = -CCanvas::PAN_STEP;
     else
         return {};
-
-    if (!g_pCanvas->active)
-        g_pCanvas->enter();
 
     g_pCanvas->offset.x += delta.x / g_pCanvas->zoom;
     g_pCanvas->offset.y += delta.y / g_pCanvas->zoom;
@@ -412,14 +432,13 @@ SDispatchResult dispatchZoom(std::string args) {
     auto mon = Desktop::focusState()->monitor();
     if (!mon) return {};
 
-    const auto monSize = mon->m_transformedSize;
-    const Vector2D center = {monSize.x / 2.0, monSize.y / 2.0};
+    const Vector2D center = mon->m_position + mon->m_size / 2.0;
 
     double newZoom = g_pCanvas->zoom;
     if (args == "in")
-        newZoom *= CCanvas::ZOOM_STEP;
+        newZoom *= 1.10;
     else if (args == "out")
-        newZoom /= CCanvas::ZOOM_STEP;
+        newZoom /= 1.10;
     else if (args == "reset")
         newZoom = 1.0;
     else
@@ -656,8 +675,8 @@ void CCanvas::enter() {
         SEntry entry;
         entry.window = w;
         entry.id = (uint64_t)w.get();
-        entry.currentPos = w->m_realPosition->value();
-        entry.currentSize = w->m_realSize->value();
+        entry.currentPos = w->m_position;
+        entry.currentSize = w->m_size;
         entry.center = entry.currentPos + entry.currentSize / 2.0;
         entry.wasFloating = w->m_isFloating;
 
@@ -801,10 +820,7 @@ Vector2D CCanvas::monitorCenter() const {
     if (!mon)
         return {0, 0};
 
-    return {
-        mon->m_position.x + mon->m_transformedSize.x / 2.0,
-        mon->m_position.y + mon->m_transformedSize.y / 2.0,
-    };
+    return mon->m_position + mon->m_size / 2.0;
 }
 
 void CCanvas::home(ECommitMode mode) {
@@ -1206,27 +1222,49 @@ SDispatchResult dispatchOverview(std::string args) {
         // Max row width ≈ viewport width in canvas space (no zoom change)
         auto mon = Desktop::focusState()->monitor();
         const double maxRowWidth = mon
-            ? (mon->m_transformedSize.x / g_pCanvas->zoom) * 0.92
+            ? (mon->m_size.x / g_pCanvas->zoom) * 0.92
             : 2400.0;
 
-        // Flow layout: place windows row by row
+        // Greedy Masonry + Deterministic Jitter layout
+        double maxW = 0.0;
+        for (auto& e : entries) {
+            maxW = std::max(maxW, e.size.x);
+        }
+        if (maxW <= 0.0) maxW = CCanvas::CANVAS_REF_W;
+
+        int numCols = std::max(2, (int)((maxRowWidth + GAP) / (maxW + GAP)));
+        std::vector<double> colHeights(numCols, 0.0);
+
         struct Placement { uint64_t id; Vector2D pos; };
         std::vector<Placement> placements;
-        double curX = 0.0, curY = 0.0, rowH = 0.0;
-        double totalW = 0.0, totalH = 0.0;
 
         for (auto& e : entries) {
-            // Wrap to next row if window doesn't fit
-            if (curX > 0 && curX + e.size.x > maxRowWidth) {
-                curX  = 0.0;
-                curY += rowH + GAP;
-                rowH  = 0.0;
+            // Find column with minimum height
+            int minCol = 0;
+            for (int i = 1; i < numCols; ++i) {
+                if (colHeights[i] < colHeights[minCol]) {
+                    minCol = i;
+                }
             }
-            placements.push_back({ e.id, { curX, curY } });
-            curX   += e.size.x + GAP;
-            rowH    = std::max(rowH, e.size.y);
-            totalW  = std::max(totalW, curX - GAP);
-            totalH  = curY + rowH;
+
+            // Determine X/Y of placement
+            double posX = minCol * (maxW + GAP);
+            double posY = colHeights[minCol];
+
+            // Deterministic jitter based on window ID to break layout uniformity organically
+            double jitterX = ((double)(e.id % 37) / 37.0 - 0.5) * 40.0; // [-20, 20] px
+            double jitterY = ((double)(e.id % 43) / 43.0 - 0.5) * 40.0; // [-20, 20] px
+
+            placements.push_back({ e.id, { posX + jitterX, posY + jitterY } });
+
+            // Update column height based on actual placed boundary
+            colHeights[minCol] = posY + e.size.y + GAP;
+        }
+
+        double totalW = numCols * maxW + (numCols - 1) * GAP;
+        double totalH = 0.0;
+        for (double h : colHeights) {
+            totalH = std::max(totalH, h - GAP);
         }
 
         // Center the cluster around the current viewport center in canvas space
