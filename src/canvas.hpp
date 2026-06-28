@@ -72,6 +72,7 @@ class CCanvas {
 
 
     void centerActive(ECommitMode mode);
+    void home(ECommitMode mode);
     void nav(const std::string& direction);
     void togglePin();
 

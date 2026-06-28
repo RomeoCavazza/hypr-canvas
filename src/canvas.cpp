@@ -330,6 +330,20 @@ SDispatchResult dispatchCenter(std::string args) {
     return {};
 }
 
+SDispatchResult dispatchHome(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->workspaceChanged())
+        g_pCanvas->resetForWorkspaceChange();
+
+    g_pCanvas->ensureActive();
+    g_pCanvas->home(ECommitMode::Animate);
+
+    scheduleFrame();
+    return {};
+}
+
 
 
 // --- canvas:nav -----------------------------------------------------------
@@ -889,6 +903,11 @@ Vector2D CCanvas::monitorCenter() const {
 
 void CCanvas::centerActive(ECommitMode mode) {
     centerOnWindow(activeCanvasWindow(), mode);
+}
+
+void CCanvas::home(ECommitMode mode) {
+    zoom = 1.0;
+    centerActive(mode);
 }
 
 void CCanvas::nav(const std::string& direction) {
