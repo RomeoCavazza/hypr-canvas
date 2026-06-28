@@ -17,7 +17,6 @@ extern SDispatchResult dispatchZoom(std::string args);
 extern SDispatchResult dispatchPin(std::string args);
 extern SDispatchResult dispatchFloat(std::string args);
 extern SDispatchResult dispatchOverview(std::string args);
-extern SDispatchResult dispatchBookmark(std::string args);
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     PHANDLE = handle;
@@ -34,7 +33,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:pin",      dispatchPin);
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:float",    dispatchFloat);
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:overview", dispatchOverview);
-    HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:bookmark", dispatchBookmark);
 
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:canvas:protected_apps", Hyprlang::STRING{(char*)""});
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:canvas:debug", Hyprlang::INT{0});

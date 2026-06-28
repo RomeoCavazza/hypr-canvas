@@ -99,7 +99,6 @@ class CCanvas {
     double m_preOverviewZoom = 1.0;
     Vector2D m_preOverviewOffset = {0, 0};
     double m_pinchStartZoom = 1.0;
-    std::map<int, std::pair<double, Vector2D>> m_bookmarks;
 
     // Hooks — only mouse input hooks needed (no render hooks!)
     CFunctionHook* m_mouseWheelHook  = nullptr;

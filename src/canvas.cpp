@@ -780,7 +780,6 @@ void CCanvas::exit() {
     m_resizingWindow = false;
     m_dragWindow = 0;
     m_overviewActive = false;
-    m_bookmarks.clear();
 
     // Force relayout to snap windows back to tiling
     auto mon = Desktop::focusState()->monitor();
@@ -1225,60 +1224,6 @@ SDispatchResult dispatchOverview(std::string args) {
 
         g_pCanvas->repositionWindows(ECommitMode::Animate);
         logf("[hypr-canvas] overview toggle on: count=%zu zoom=%.3f\n", count, g_pCanvas->zoom);
-    }
-
-    scheduleFrame();
-    return {};
-}
-
-SDispatchResult dispatchBookmark(std::string args) {
-    if (!g_pCanvas)
-        return {};
-
-    if (g_pCanvas->workspaceChanged())
-        g_pCanvas->resetForWorkspaceChange();
-
-    g_pCanvas->ensureActive();
-
-    bool setMode = false;
-    int bookmarkId = 0;
-
-    std::stringstream ss(args);
-    std::string token;
-    ss >> token;
-    if (token == "set") {
-        setMode = true;
-        ss >> bookmarkId;
-    } else if (token == "goto") {
-        setMode = false;
-        ss >> bookmarkId;
-    } else {
-        try {
-            bookmarkId = std::stoi(token);
-        } catch (...) {
-            logf("[hypr-canvas] invalid bookmark arg: %s\n", args.c_str());
-            return {};
-        }
-    }
-
-    if (bookmarkId < 1 || bookmarkId > 9) {
-        logf("[hypr-canvas] bookmark ID must be between 1 and 9: %d\n", bookmarkId);
-        return {};
-    }
-
-    auto& bookmarks = g_pCanvas->m_bookmarks;
-    if (setMode || !bookmarks.contains(bookmarkId)) {
-        bookmarks[bookmarkId] = { g_pCanvas->zoom, g_pCanvas->offset };
-        logf("[hypr-canvas] saved bookmark %d: zoom=%.3f offset=(%.1f, %.1f)\n",
-             bookmarkId, g_pCanvas->zoom, g_pCanvas->offset.x, g_pCanvas->offset.y);
-    } else {
-        g_pCanvas->m_overviewActive = false;
-        auto [savedZoom, savedOffset] = bookmarks[bookmarkId];
-        g_pCanvas->zoom = savedZoom;
-        g_pCanvas->offset = savedOffset;
-        g_pCanvas->repositionWindows(ECommitMode::Animate);
-        logf("[hypr-canvas] jumped to bookmark %d: zoom=%.3f offset=(%.1f, %.1f)\n",
-             bookmarkId, savedZoom, savedOffset.x, savedOffset.y);
     }
 
     scheduleFrame();
