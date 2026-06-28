@@ -891,6 +891,8 @@ void CCanvas::exit() {
     wsState.resumeOnWorkspaceFocus = false;
     m_workspaceStates[m_canvasWorkspace] = wsState;
 
+    active = false;
+
     // Restore all saved window positions and float state
     for (auto& w : g_pCompositor->m_windows) {
         if (!w || w->isHidden() || !w->m_isMapped || !windowOnCanvasWorkspace(w))
@@ -914,7 +916,6 @@ void CCanvas::exit() {
     }
 
     m_savedStates.clear();
-    active = false;
     zoom = 1.0;
     offset = {0, 0};
     m_canvasWorkspace = WORKSPACE_INVALID;
