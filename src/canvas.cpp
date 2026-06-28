@@ -85,6 +85,8 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
             if (!g_pCanvas->active)
                 g_pCanvas->enter();
 
+            g_pCanvas->m_overviewActive = false;
+
             const double zoomFactor = std::pow(CCanvas::ZOOM_STEP, std::abs(scrollDelta));
             double       newZoom    = g_pCanvas->zoom;
             if (scrollDelta < 0)
@@ -145,6 +147,7 @@ static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e, SP<IP
             }
 
             if (e.state == WL_POINTER_BUTTON_STATE_PRESSED) {
+                g_pCanvas->m_overviewActive = false;
                 const auto coords = g_pInputManager->getMouseCoordsInternal();
                 using namespace Desktop::View;
                 auto windowUnder = g_pCompositor->vectorToWindowUnified(coords, RESERVED_EXTENTS | INPUT_EXTENTS | ALLOW_FLOATING);
@@ -392,6 +395,8 @@ SDispatchResult dispatchPan(std::string args) {
     if (!g_pCanvas->active)
         g_pCanvas->enter();
 
+    g_pCanvas->m_overviewActive = false;
+
     g_pCanvas->offset.x += delta.x / g_pCanvas->zoom;
     g_pCanvas->offset.y += delta.y / g_pCanvas->zoom;
     g_pCanvas->repositionWindows(ECommitMode::Warp);
@@ -426,6 +431,8 @@ SDispatchResult dispatchZoom(std::string args) {
 
     if (!g_pCanvas->active)
         g_pCanvas->enter();
+
+    g_pCanvas->m_overviewActive = false;
 
     g_pCanvas->applyZoom(newZoom, center);
     g_pCanvas->repositionWindows(ECommitMode::Warp);
@@ -554,6 +561,55 @@ CCanvas::CCanvas() {
     m_closeWindowListener = Event::bus()->m_events.window.close.listen([this](PHLWINDOW w) {
         if (!w) return;
         m_savedStates.erase((uint64_t)w.get());
+    });
+    m_openWindowListener = Event::bus()->m_events.window.open.listen([this](PHLWINDOW w) {
+        onWindowOpen(w);
+    });
+
+    m_swipeBeginListener = Event::bus()->m_events.gesture.swipe.begin.listen([this](IPointer::SSwipeBeginEvent e, Event::SCallbackInfo& info) {
+        if (!active) return;
+        m_overviewActive = false;
+        m_panning = true;
+        info.cancelled = true;
+    });
+    m_swipeUpdateListener = Event::bus()->m_events.gesture.swipe.update.listen([this](IPointer::SSwipeUpdateEvent e, Event::SCallbackInfo& info) {
+        if (!active) return;
+        if (e.fingers == 3 || e.fingers == 4) {
+            offset.x -= e.delta.x / zoom;
+            offset.y -= e.delta.y / zoom;
+            repositionWindows(ECommitMode::Warp);
+            scheduleFrame();
+            info.cancelled = true;
+        }
+    });
+    m_swipeEndListener = Event::bus()->m_events.gesture.swipe.end.listen([this](IPointer::SSwipeEndEvent e, Event::SCallbackInfo& info) {
+        if (!active) return;
+        m_panning = false;
+        info.cancelled = true;
+        emitIPCEvent(true);
+    });
+
+    m_pinchBeginListener = Event::bus()->m_events.gesture.pinch.begin.listen([this](IPointer::SPinchBeginEvent e, Event::SCallbackInfo& info) {
+        if (!active) return;
+        m_overviewActive = false;
+        m_pinchStartZoom = zoom;
+        info.cancelled = true;
+    });
+    m_pinchUpdateListener = Event::bus()->m_events.gesture.pinch.update.listen([this](IPointer::SPinchUpdateEvent e, Event::SCallbackInfo& info) {
+        if (!active) return;
+        if (e.fingers == 2 || e.fingers == 3) {
+            double newZoom = m_pinchStartZoom * e.scale;
+            Vector2D cursorCoords = g_pInputManager->getMouseCoordsInternal();
+            applyZoom(newZoom, cursorCoords);
+            repositionWindows(ECommitMode::Warp);
+            scheduleFrame();
+            info.cancelled = true;
+        }
+    });
+    m_pinchEndListener = Event::bus()->m_events.gesture.pinch.end.listen([this](IPointer::SPinchEndEvent e, Event::SCallbackInfo& info) {
+        if (!active) return;
+        info.cancelled = true;
+        emitIPCEvent(true);
     });
 
     logf("[hypr-canvas] initialized (VXWM mode — no render hooks)\n");
@@ -723,6 +779,8 @@ void CCanvas::exit() {
     m_movingWindow = false;
     m_resizingWindow = false;
     m_dragWindow = 0;
+    m_overviewActive = false;
+    m_bookmarks.clear();
 
     // Force relayout to snap windows back to tiling
     auto mon = Desktop::focusState()->monitor();
@@ -1055,4 +1113,174 @@ void CCanvas::applyZoom(double newZoom, const Vector2D& anchorScreen) {
 void CCanvas::pan(const Vector2D& delta) {
     offset.x += delta.x / zoom;
     offset.y += delta.y / zoom;
+}
+
+void CCanvas::onWindowOpen(const SP<Desktop::View::CWindow>& w) {
+    if (!active || !w) return;
+
+    if (isProtectedApp(w) || w->isHidden() || !windowOnCanvasWorkspace(w))
+        return;
+
+    uint64_t id = (uint64_t)w.get();
+    if (m_savedStates.contains(id))
+        return;
+
+    logf("[hypr-canvas] new window opened while canvas active: id=%lx class=%s title=%s\n",
+         id, w->m_class.c_str(), w->m_title.c_str());
+
+    w->m_isFloating = true;
+
+    SWindowState state;
+    state.restorePos = w->m_realPosition->value();
+    state.restoreSize = w->m_realSize->value();
+    state.wasFloating = true;
+    state.pinned = false;
+
+    Vector2D initialSize = w->m_realSize->value();
+    if (initialSize.x < CCanvas::MIN_WINDOW_W || initialSize.y < CCanvas::MIN_WINDOW_H) {
+        initialSize = {800, 600};
+    }
+
+    Vector2D centerScreen = monitorCenter();
+    Vector2D centerCanvas = screenToCanvas(centerScreen);
+
+    state.canvasSize = initialSize;
+    state.canvasPos = centerCanvas - initialSize / 2.0;
+
+    m_savedStates[id] = state;
+
+    Vector2D screenPos = (state.canvasPos - offset) * zoom;
+    Vector2D screenSize = state.canvasSize * zoom;
+
+    commitWindow(w, screenPos, screenSize, ECommitMode::Animate);
+
+    g_pHyprRenderer->damageWindow(w);
+    scheduleFrame();
+}
+
+SDispatchResult dispatchOverview(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->workspaceChanged())
+        g_pCanvas->resetForWorkspaceChange();
+
+    g_pCanvas->ensureActive();
+
+    if (g_pCanvas->m_overviewActive) {
+        g_pCanvas->m_overviewActive = false;
+
+        auto activeW = g_pCanvas->activeCanvasWindow();
+        if (activeW) {
+            g_pCanvas->zoom = g_pCanvas->m_preOverviewZoom;
+            g_pCanvas->centerOnWindow(activeW, ECommitMode::Animate);
+            g_pCanvas->focusWindow(activeW);
+            logf("[hypr-canvas] overview toggle off: centering on active window\n");
+        } else {
+            g_pCanvas->zoom = g_pCanvas->m_preOverviewZoom;
+            g_pCanvas->offset = g_pCanvas->m_preOverviewOffset;
+            g_pCanvas->repositionWindows(ECommitMode::Animate);
+            logf("[hypr-canvas] overview toggle off: restoring offset\n");
+        }
+    } else {
+        double minX = std::numeric_limits<double>::infinity();
+        double minY = std::numeric_limits<double>::infinity();
+        double maxX = -std::numeric_limits<double>::infinity();
+        double maxY = -std::numeric_limits<double>::infinity();
+
+        size_t count = 0;
+        for (auto& [id, state] : g_pCanvas->m_savedStates) {
+            if (state.pinned) continue;
+            minX = std::min(minX, state.canvasPos.x);
+            minY = std::min(minY, state.canvasPos.y);
+            maxX = std::max(maxX, state.canvasPos.x + state.canvasSize.x);
+            maxY = std::max(maxY, state.canvasPos.y + state.canvasSize.y);
+            count++;
+        }
+
+        if (count == 0) {
+            logf("[hypr-canvas] overview: no windows to fit\n");
+            return {};
+        }
+
+        g_pCanvas->m_preOverviewZoom = g_pCanvas->zoom;
+        g_pCanvas->m_preOverviewOffset = g_pCanvas->offset;
+        g_pCanvas->m_overviewActive = true;
+
+        auto mon = Desktop::focusState()->monitor();
+        if (!mon) return {};
+
+        const auto monSize = mon->m_transformedSize;
+        const double w = maxX - minX;
+        const double h = maxY - minY;
+
+        double targetZoomX = monSize.x * 0.9 / std::max(w, 1.0);
+        double targetZoomY = monSize.y * 0.9 / std::max(h, 1.0);
+        double targetZoom = std::min(targetZoomX, targetZoomY);
+
+        g_pCanvas->zoom = std::clamp(targetZoom, CCanvas::ZOOM_MIN, CCanvas::ZOOM_MAX);
+
+        Vector2D centerBox = { minX + w / 2.0, minY + h / 2.0 };
+        g_pCanvas->offset = centerBox - g_pCanvas->monitorCenter() / g_pCanvas->zoom;
+
+        g_pCanvas->repositionWindows(ECommitMode::Animate);
+        logf("[hypr-canvas] overview toggle on: count=%zu zoom=%.3f\n", count, g_pCanvas->zoom);
+    }
+
+    scheduleFrame();
+    return {};
+}
+
+SDispatchResult dispatchBookmark(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->workspaceChanged())
+        g_pCanvas->resetForWorkspaceChange();
+
+    g_pCanvas->ensureActive();
+
+    bool setMode = false;
+    int bookmarkId = 0;
+
+    std::stringstream ss(args);
+    std::string token;
+    ss >> token;
+    if (token == "set") {
+        setMode = true;
+        ss >> bookmarkId;
+    } else if (token == "goto") {
+        setMode = false;
+        ss >> bookmarkId;
+    } else {
+        try {
+            bookmarkId = std::stoi(token);
+        } catch (...) {
+            logf("[hypr-canvas] invalid bookmark arg: %s\n", args.c_str());
+            return {};
+        }
+    }
+
+    if (bookmarkId < 1 || bookmarkId > 9) {
+        logf("[hypr-canvas] bookmark ID must be between 1 and 9: %d\n", bookmarkId);
+        return {};
+    }
+
+    auto& bookmarks = g_pCanvas->m_bookmarks;
+    if (setMode || !bookmarks.contains(bookmarkId)) {
+        bookmarks[bookmarkId] = { g_pCanvas->zoom, g_pCanvas->offset };
+        logf("[hypr-canvas] saved bookmark %d: zoom=%.3f offset=(%.1f, %.1f)\n",
+             bookmarkId, g_pCanvas->zoom, g_pCanvas->offset.x, g_pCanvas->offset.y);
+    } else {
+        g_pCanvas->m_overviewActive = false;
+        auto [savedZoom, savedOffset] = bookmarks[bookmarkId];
+        g_pCanvas->zoom = savedZoom;
+        g_pCanvas->offset = savedOffset;
+        g_pCanvas->repositionWindows(ECommitMode::Animate);
+        logf("[hypr-canvas] jumped to bookmark %d: zoom=%.3f offset=(%.1f, %.1f)\n",
+             bookmarkId, savedZoom, savedOffset.x, savedOffset.y);
+    }
+
+    scheduleFrame();
+    return {};
 }

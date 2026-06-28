@@ -94,6 +94,13 @@ class CCanvas {
     bool m_resizingWindow = false;
     uint64_t m_dragWindow = 0;
 
+    // Overview & gesture state
+    bool m_overviewActive = false;
+    double m_preOverviewZoom = 1.0;
+    Vector2D m_preOverviewOffset = {0, 0};
+    double m_pinchStartZoom = 1.0;
+    std::map<int, std::pair<double, Vector2D>> m_bookmarks;
+
     // Hooks — only mouse input hooks needed (no render hooks!)
     CFunctionHook* m_mouseWheelHook  = nullptr;
     CFunctionHook* m_mouseButtonHook = nullptr;
@@ -102,11 +109,19 @@ class CCanvas {
     // IPC & Protected apps
     void emitIPCEvent(bool force = false);
     bool isProtectedApp(const SP<Desktop::View::CWindow>& window) const;
+    void onWindowOpen(const SP<Desktop::View::CWindow>& window);
 
     // Cooldown & Signal listeners
     std::chrono::steady_clock::time_point m_lastNavTime;
     CHyprSignalListener m_destroyWindowListener;
     CHyprSignalListener m_closeWindowListener;
+    CHyprSignalListener m_openWindowListener;
+    CHyprSignalListener m_swipeBeginListener;
+    CHyprSignalListener m_swipeUpdateListener;
+    CHyprSignalListener m_swipeEndListener;
+    CHyprSignalListener m_pinchBeginListener;
+    CHyprSignalListener m_pinchUpdateListener;
+    CHyprSignalListener m_pinchEndListener;
 };
 
 inline std::unique_ptr<CCanvas> g_pCanvas;
