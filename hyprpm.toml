@@ -1,0 +1,11 @@
+[repository]
+name = "hypr-canvas"
+authors = ["Aaron", "tco"]
+description = "VXWM-style infinite canvas — physically moves windows"
+
+[hypr-canvas]
+description = "VXWM-style infinite canvas — physically moves windows"
+output = "hypr-canvas.so"
+build = [
+    "make all"
+]

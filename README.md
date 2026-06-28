@@ -1,20 +1,14 @@
 # hyprcanvas
 
+[![Build](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/build.yml/badge.svg)](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/build.yml)
+[![Release](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/release.yml/badge.svg)](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/release.yml)
+[![Hyprland](https://img.shields.io/badge/Hyprland-v0.55.4-58E1FF)](https://github.com/hyprwm/Hyprland/releases/tag/v0.55.4)
+
+<video src="./assets/showcase.mp4" controls width="100%"></video>
+
 Native C++ infinite canvas mode for Hyprland.
 
 hyprcanvas turns one Hyprland workspace into a spatial plane: windows become persistent cards in virtual canvas coordinates, and the monitor becomes a camera controlled by `offset + zoom`.
-
-It is not a Niri clone, not a PaperWM layout, and not a full window manager. The scope is deliberately small: a clean canvas mode for Hyprland with native input hooks, no Python daemon, no `/dev/input` polling, and no IPC spam.
-
-## Design
-
-- One source of truth: every managed window has `canvasPos` and `canvasSize`.
-- Mouse movement is immediate: drag, resize, pan, and wheel zoom commit with `setValueAndWarp`.
-- Keyboard navigation is animated: `home`, `center`, and `nav` assign Hyprland animated variables and let the compositor move the world.
-- Focus is intentional: navigation picks a target, recenters the viewport, then asks Hyprland's native `focuswindow` dispatcher to focus it.
-- The mode is explicit: enter canvas, work spatially, exit back to the original tiling/floating state.
-
-The current implementation follows the VXWM/Pedrito model: it physically moves windows as cards instead of trying to hook the entire renderer as a true camera transform.
 
 ## Dispatchers
 
@@ -38,7 +32,11 @@ canvas:overview
 `canvas:float` is a canvas-aware wrapper around Hyprland's `togglefloating`: outside canvas mode it behaves like the native dispatcher; inside canvas mode it exits the workspace canvas cleanly, refocuses the active card, then toggles that window's floating state.
 `canvas:swap` is canvas-aware too: outside canvas mode it delegates to Hyprland's native `swapwindow`; inside canvas mode it swaps the active card's `canvasPos` and `canvasSize` with the best directional target, then recenters the active card.
 
-## Suggested Binds
+### Closer Look
+
+<video src="./assets/demo.mp4" controls width="100%"></video>
+
+## Configuration
 
 ```conf
 bind = SUPER, Z, canvas:toggle
@@ -96,7 +94,3 @@ Or configure Hyprland:
 ```conf
 plugin = /absolute/path/to/hypr-canvas.so
 ```
-
-## Status
-
-This is an alpha plugin against Hyprland internals. The 0.55.4-oriented branch is intentionally being rebuilt around a small, readable canvas-mode core with per-workspace shape memory, protected apps, overview clustering, and canvas-aware keybind wrappers.
