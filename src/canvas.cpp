@@ -303,6 +303,19 @@ SDispatchResult dispatchReset(std::string args) {
     return {};
 }
 
+SDispatchResult dispatchHome(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->workspaceChanged())
+        g_pCanvas->resetForWorkspaceChange();
+
+    g_pCanvas->ensureActive();
+    g_pCanvas->home(ECommitMode::Animate);
+    logf("[hypr-canvas] home (reset viewport to active window, zoom 1.0)\n");
+    scheduleFrame();
+    return {};
+}
 
 SDispatchResult dispatchCenter(std::string args) {
     if (!g_pCanvas)
@@ -799,6 +812,11 @@ Vector2D CCanvas::monitorCenter() const {
 }
 
 
+void CCanvas::home(ECommitMode mode) {
+    zoom = 1.0;
+    centerActive(mode);
+}
+
 void CCanvas::centerActive(ECommitMode mode) {
     centerOnWindow(activeCanvasWindow(), mode);
 }
@@ -1217,17 +1235,13 @@ SDispatchResult dispatchOverview(std::string args) {
                 }
             }
 
-            // Determine X/Y of placement
+            // Determine X/Y of placement (no jitter to prevent overlaps, ensuring strict GAP on all sides)
             double posX = minCol * (maxW + GAP);
             double posY = colHeights[minCol];
 
-            // Deterministic jitter based on window ID to break layout uniformity organically
-            double jitterX = ((double)(e.id % 37) / 37.0 - 0.5) * 40.0; // [-20, 20] px
-            double jitterY = ((double)(e.id % 43) / 43.0 - 0.5) * 40.0; // [-20, 20] px
+            placements.push_back({ e.id, { posX, posY } });
 
-            placements.push_back({ e.id, { posX + jitterX, posY + jitterY } });
-
-            // Update column height based on actual placed boundary
+            // Update column height based on actual placed boundary plus GAP
             colHeights[minCol] = posY + e.size.y + GAP;
         }
 
