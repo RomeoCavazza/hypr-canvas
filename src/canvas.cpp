@@ -1030,6 +1030,8 @@ void CCanvas::swap(const std::string& direction) {
     std::swap(sourceIt->second.canvasPos, targetIt->second.canvasPos);
     std::swap(sourceIt->second.canvasSize, targetIt->second.canvasSize);
 
+    g_pCompositor->changeWindowZOrder(source, true);
+
     centerOnWindow(source, ECommitMode::Animate);
     focusWindow(source);
     logf("[hypr-canvas] swap %s source=%lx target=%lx\n",
