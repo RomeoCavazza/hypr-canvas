@@ -7,6 +7,7 @@
 #include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/managers/PointerManager.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/Transformer.hpp>
 #include <hyprland/src/layout/LayoutManager.hpp>
 #include <hyprland/src/helpers/Monitor.hpp>
 
@@ -42,10 +43,84 @@ static void scheduleFrame() {
 // --- Forward typedefs ---
 using PHLWINDOW = SP<Desktop::View::CWindow>;
 
+class CCanvasWindowTransformer final : public IWindowTransformer {
+  public:
+    explicit CCanvasWindowTransformer(uint64_t id) : m_windowId(id) {}
+
+    SP<Render::IFramebuffer> transform(SP<Render::IFramebuffer> in) override {
+        return in;
+    }
+
+    void preWindowRender(CSurfacePassElement::SRenderData* data) override {
+        if (!data || !data->pWindow || !g_pCanvas || !g_pCanvas->active)
+            return;
+
+        if ((uint64_t)data->pWindow.get() != m_windowId)
+            return;
+
+        const auto it = g_pCanvas->m_savedStates.find(m_windowId);
+        if (it == g_pCanvas->m_savedStates.end() || it->second.pinned)
+            return;
+
+        const Vector2D visualPos = g_pCanvas->visualWindowPos(data->pWindow, it->second);
+        const Vector2D visualSize = g_pCanvas->visualWindowSize(data->pWindow, it->second);
+        data->pos = visualPos;
+        data->w = std::max(5.0, visualSize.x);
+        data->h = std::max(5.0, visualSize.y);
+    }
+
+  private:
+    uint64_t m_windowId = 0;
+};
+
+static bool isCanvasWindowTransformer(const UP<IWindowTransformer>& transformer) {
+    return dynamic_cast<CCanvasWindowTransformer*>(transformer.get()) != nullptr;
+}
+
 // --- Scroll/zoom hook ---
 
 typedef void (*onMouseWheelFn)(CInputManager*, IPointer::SAxisEvent, SP<IPointer>);
 typedef Vector2D (*positionFn)(CPointerManager*);
+typedef PHLWINDOW (*vectorToWindowUnifiedFn)(CCompositor*, const Vector2D&, uint16_t, PHLWINDOW);
+typedef SP<CWLSurfaceResource> (*vectorWindowToSurfaceFn)(CCompositor*, const Vector2D&, PHLWINDOW, Vector2D&);
+
+static PHLWINDOW hkVectorToWindowUnified(CCompositor* self, const Vector2D& pos, uint16_t properties, PHLWINDOW ignore) {
+    if (g_pCanvas && g_pCanvas->active) {
+        auto window = g_pCanvas->windowAtVisualPoint(pos);
+        if (window && window != ignore)
+            return window;
+
+        auto original = (vectorToWindowUnifiedFn)g_pCanvas->m_windowHitHook->m_original;
+        auto fallback = original(self, pos, properties, ignore);
+        if (!fallback)
+            return {};
+
+        const uint64_t id = (uint64_t)fallback.get();
+        auto it = g_pCanvas->m_savedStates.find(id);
+        if (it != g_pCanvas->m_savedStates.end() && !it->second.pinned && !fallback->m_pinned && !g_pCanvas->isProtectedApp(fallback))
+            return {};
+
+        return fallback;
+    }
+
+    auto original = (vectorToWindowUnifiedFn)g_pCanvas->m_windowHitHook->m_original;
+    return original(self, pos, properties, ignore);
+}
+
+static SP<CWLSurfaceResource> hkVectorWindowToSurface(CCompositor* self, const Vector2D& pos, PHLWINDOW window, Vector2D& surfaceLocal) {
+    if (g_pCanvas && g_pCanvas->active && window && g_pCanvas->windowOnCanvasWorkspace(window)) {
+        const uint64_t id = (uint64_t)window.get();
+        auto it = g_pCanvas->m_savedStates.find(id);
+        if (it != g_pCanvas->m_savedStates.end() && !it->second.pinned && !window->m_pinned && !g_pCanvas->isProtectedApp(window)) {
+            const Vector2D mappedPos = g_pCanvas->visualPointToLogicalPoint(window, it->second, pos);
+            auto original = (vectorWindowToSurfaceFn)g_pCanvas->m_surfaceHitHook->m_original;
+            return original(self, mappedPos, window, surfaceLocal);
+        }
+    }
+
+    auto original = (vectorWindowToSurfaceFn)g_pCanvas->m_surfaceHitHook->m_original;
+    return original(self, pos, window, surfaceLocal);
+}
 
 static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPointer> pointer) {
     const uint32_t mods = g_pInputManager->getModsFromAllKBs();
@@ -101,8 +176,7 @@ static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e, SP<IP
         if ((mods & HL_MODIFIER_META) && e.state == WL_POINTER_BUTTON_STATE_PRESSED) {
             if (!g_pCanvas->active && e.button == BTN_LEFT) {
                 const auto coords = g_pInputManager->getMouseCoordsInternal();
-                using namespace Desktop::View;
-                auto windowUnder = g_pCompositor->vectorToWindowUnified(coords, RESERVED_EXTENTS | INPUT_EXTENTS | ALLOW_FLOATING);
+                auto windowUnder = g_pCanvas->windowAtVisualPoint(coords);
 
                 if (!windowUnder) {
                     g_pCanvas->enter();
@@ -121,8 +195,7 @@ static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e, SP<IP
             if (e.state == WL_POINTER_BUTTON_STATE_PRESSED) {
                 g_pCanvas->m_overviewActive = false;
                 const auto coords = g_pInputManager->getMouseCoordsInternal();
-                using namespace Desktop::View;
-                auto windowUnder = g_pCompositor->vectorToWindowUnified(coords, RESERVED_EXTENTS | INPUT_EXTENTS | ALLOW_FLOATING);
+                auto windowUnder = g_pCanvas->windowAtVisualPoint(coords);
 
                 if (e.button == BTN_LEFT && !windowUnder) {
                     g_pCanvas->m_panning = true;
@@ -591,6 +664,8 @@ CCanvas::CCanvas() {
     m_mouseWheelHook  = hookByName("onMouseWheel", (void*)&hkOnMouseWheel);
     m_mouseButtonHook = hookByName("onMouseButton", (void*)&hkOnMouseButton);
     m_mouseMovedHook  = hookByName("onMouseMoved", (void*)&hkOnMouseMoved);
+    m_windowHitHook   = hookByName("vectorToWindowUnified", (void*)&hkVectorToWindowUnified);
+    m_surfaceHitHook  = hookByName("vectorWindowToSurface", (void*)&hkVectorWindowToSurface);
 
     m_destroyWindowListener = Event::bus()->m_events.window.destroy.listen([this](PHLWINDOW w) {
         forgetWindow(w, false);
@@ -694,6 +769,10 @@ CCanvas::~CCanvas() {
         HyprlandAPI::removeFunctionHook(PHANDLE, m_mouseButtonHook);
     if (m_mouseMovedHook)
         HyprlandAPI::removeFunctionHook(PHANDLE, m_mouseMovedHook);
+    if (m_windowHitHook)
+        HyprlandAPI::removeFunctionHook(PHANDLE, m_windowHitHook);
+    if (m_surfaceHitHook)
+        HyprlandAPI::removeFunctionHook(PHANDLE, m_surfaceHitHook);
 }
 
 // --- Canvas mode enter/exit ---
@@ -838,10 +917,9 @@ void CCanvas::enter() {
         g_pHyprRenderer->damageWindow(w);
 
         setWindowFloating(w, true);
+        attachWindowTransformer(w);
 
-        Vector2D screenPos = (state.canvasPos - offset) * zoom;
-        Vector2D screenSize = state.canvasSize * zoom;
-        commitWindow(w, screenPos, screenSize, ECommitMode::Warp);
+        commitWindow(w, logicalWindowPos(state), logicalWindowSize(state), ECommitMode::Warp);
         g_pHyprRenderer->damageWindow(w);
     }
 
@@ -912,6 +990,7 @@ void CCanvas::exit() {
         g_layoutManager->recalculateMonitor(mon);
 
     logf("[hypr-canvas] exited canvas mode, restored windows\n");
+    detachAllWindowTransformers();
     emitIPCEvent(true);
 }
 
@@ -926,6 +1005,10 @@ Vector2D CCanvas::screenToCanvas(const Vector2D& screen) const {
 
 Vector2D CCanvas::canvasToScreen(const Vector2D& canvas) const {
     return (canvas - offset) * zoom;
+}
+
+Vector2D CCanvas::canvasSizeToScreen(const Vector2D& canvasSize) const {
+    return canvasSize * zoom;
 }
 
 Vector2D CCanvas::monitorCenter() const {
@@ -1031,9 +1114,14 @@ void CCanvas::togglePin() {
 
     it->second.pinned = !it->second.pinned;
     target->m_pinned = it->second.pinned;
+    if (it->second.pinned)
+        detachWindowTransformer(target);
+    else
+        attachWindowTransformer(target);
+
     if (!it->second.pinned) {
         it->second.canvasPos = screenToCanvas(target->m_realPosition->value());
-        it->second.canvasSize = target->m_realSize->value() / zoom;
+        it->second.canvasSize = target->m_realSize->value();
     }
 
     logf("[hypr-canvas] pin id=%lx pinned=%d\n", id, it->second.pinned ? 1 : 0);
@@ -1219,6 +1307,111 @@ void CCanvas::commitWindow(const SP<Desktop::View::CWindow>& window, const Vecto
     g_pHyprRenderer->damageWindow(window);
 }
 
+void CCanvas::attachWindowTransformer(const SP<Desktop::View::CWindow>& window) const {
+    if (!window)
+        return;
+
+    for (const auto& transformer : window->m_transformers) {
+        if (isCanvasWindowTransformer(transformer))
+            return;
+    }
+
+    window->m_transformers.emplace_back(makeUnique<CCanvasWindowTransformer>((uint64_t)window.get()));
+}
+
+void CCanvas::detachWindowTransformer(const SP<Desktop::View::CWindow>& window) const {
+    if (!window)
+        return;
+
+    window->m_transformers.erase(
+        std::remove_if(window->m_transformers.begin(), window->m_transformers.end(), isCanvasWindowTransformer),
+        window->m_transformers.end());
+}
+
+void CCanvas::detachAllWindowTransformers() const {
+    for (auto& w : g_pCompositor->m_windows)
+        detachWindowTransformer(w);
+}
+
+bool CCanvas::rendersAtNativeSize(const SP<Desktop::View::CWindow>& window) const {
+    return active && window && Desktop::focusState()->window() == window;
+}
+
+Vector2D CCanvas::logicalWindowPos(const SWindowState& state) const {
+    return canvasToScreen(state.canvasPos);
+}
+
+Vector2D CCanvas::logicalWindowSize(const SWindowState& state) const {
+    return state.canvasSize;
+}
+
+Vector2D CCanvas::visualWindowPos(const SP<Desktop::View::CWindow>& window, const SWindowState& state) const {
+    const Vector2D canvasCenter = state.canvasPos + state.canvasSize / 2.0;
+    return canvasToScreen(canvasCenter) - visualWindowSize(window, state) / 2.0;
+}
+
+Vector2D CCanvas::visualWindowSize(const SP<Desktop::View::CWindow>& window, const SWindowState& state) const {
+    if (rendersAtNativeSize(window))
+        return state.canvasSize;
+
+    return canvasSizeToScreen(state.canvasSize);
+}
+
+CBox CCanvas::visualWindowBox(const SP<Desktop::View::CWindow>& window, const SWindowState& state) const {
+    return CBox{visualWindowPos(window, state), visualWindowSize(window, state)};
+}
+
+SP<Desktop::View::CWindow> CCanvas::windowAtVisualPoint(const Vector2D& point) const {
+    SP<Desktop::View::CWindow> best;
+
+    for (auto& w : g_pCompositor->m_windows) {
+        if (!w || w->isHidden() || !w->m_isMapped)
+            continue;
+
+        if (!w->acceptsInput() || w->m_X11ShouldntFocus || w->m_ruleApplicator->noFocus().valueOrDefault())
+            continue;
+
+        if (active && !windowOnCanvasWorkspace(w))
+            continue;
+
+        const uint64_t id = (uint64_t)w.get();
+        auto it = m_savedStates.find(id);
+        if (it == m_savedStates.end()) {
+            if (!active && !isProtectedApp(w)) {
+                CBox realBox{w->m_realPosition->value(), w->m_realSize->value()};
+                if (realBox.containsPoint(point))
+                    best = w;
+            }
+            continue;
+        }
+
+        const auto& state = it->second;
+        if (state.pinned || w->m_pinned || isProtectedApp(w))
+            continue;
+
+        if (visualWindowBox(w, state).containsPoint(point))
+            best = w;
+    }
+
+    return best;
+}
+
+Vector2D CCanvas::visualPointToLogicalPoint(const SP<Desktop::View::CWindow>& window, const SWindowState& state, const Vector2D& point) const {
+    const CBox     visualBox   = visualWindowBox(window, state);
+    const Vector2D logicalPos  = logicalWindowPos(state);
+    const Vector2D logicalSize = logicalWindowSize(state);
+    const Vector2D visualSize  = visualBox.size();
+
+    if (visualSize.x <= 0.0 || visualSize.y <= 0.0)
+        return logicalPos;
+
+    const Vector2D visualLocal = point - visualBox.pos();
+    return logicalPos + Vector2D{
+        visualLocal.x * logicalSize.x / visualSize.x,
+        visualLocal.y * logicalSize.y / visualSize.y,
+    };
+}
+
 // --- Reposition all windows based on zoom+offset ---
 
 void CCanvas::repositionWindows(ECommitMode mode) {
@@ -1235,17 +1428,9 @@ void CCanvas::repositionWindows(ECommitMode mode) {
         if (saved.pinned || w->m_pinned || isProtectedApp(w))
             continue;
 
-        // Canvas-to-screen: screenPos = (canvasPos - offset) * zoom
-        Vector2D newPos = {
-            (saved.canvasPos.x - offset.x) * zoom,
-            (saved.canvasPos.y - offset.y) * zoom
-        };
-        Vector2D newSize = {
-            saved.canvasSize.x * zoom,
-            saved.canvasSize.y * zoom
-        };
-
-        commitWindow(w, newPos, newSize, mode);
+        // Keep client geometry logical. Zoom is a camera concern; explicit card
+        // resize is the only canvas action that should send a client resize.
+        commitWindow(w, logicalWindowPos(saved), logicalWindowSize(saved), mode);
     }
     emitIPCEvent();
 }
@@ -1285,6 +1470,7 @@ void CCanvas::suspendForWorkspaceChange() {
     persistWorkspaceState();
     auto& wsState = m_workspaceStates[m_canvasWorkspace];
     wsState.resumeOnWorkspaceFocus = true;
+    detachAllWindowTransformers();
 
     m_savedStates.clear();
     active = false;
@@ -1324,6 +1510,7 @@ void CCanvas::forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabil
     const bool wasFocused = Desktop::focusState()->window() == window;
     const bool wasManaged = m_savedStates.contains(id);
 
+    detachWindowTransformer(window);
     m_savedStates.erase(id);
     m_overviewSavedPos.erase(id);
     for (auto& [wsId, wsState] : m_workspaceStates) {
@@ -1468,6 +1655,7 @@ void CCanvas::onWindowOpen(const SP<Desktop::View::CWindow>& w) {
 
     const bool originallyFloating = w->m_isFloating;
     setWindowFloating(w, true);
+    attachWindowTransformer(w);
 
     SWindowState state;
     state.restorePos = w->m_realPosition->value();

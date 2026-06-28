@@ -65,6 +65,7 @@ class CCanvas {
     // Coordinate transforms
     Vector2D screenToCanvas(const Vector2D& screen) const;
     Vector2D canvasToScreen(const Vector2D& canvas) const;
+    Vector2D canvasSizeToScreen(const Vector2D& canvasSize) const;
     Vector2D monitorCenter() const;
 
     // Apply zoom (cursor-anchored)
@@ -99,6 +100,17 @@ class CCanvas {
     void focusWindow(const SP<Desktop::View::CWindow>& window) const;
     void setWindowFloating(const SP<Desktop::View::CWindow>& window, bool floating) const;
     void commitWindow(const SP<Desktop::View::CWindow>& window, const Vector2D& pos, const Vector2D& size, ECommitMode mode) const;
+    void attachWindowTransformer(const SP<Desktop::View::CWindow>& window) const;
+    void detachWindowTransformer(const SP<Desktop::View::CWindow>& window) const;
+    void detachAllWindowTransformers() const;
+    bool rendersAtNativeSize(const SP<Desktop::View::CWindow>& window) const;
+    Vector2D logicalWindowPos(const SWindowState& state) const;
+    Vector2D logicalWindowSize(const SWindowState& state) const;
+    Vector2D visualWindowPos(const SP<Desktop::View::CWindow>& window, const SWindowState& state) const;
+    Vector2D visualWindowSize(const SP<Desktop::View::CWindow>& window, const SWindowState& state) const;
+    CBox visualWindowBox(const SP<Desktop::View::CWindow>& window, const SWindowState& state) const;
+    Vector2D visualPointToLogicalPoint(const SP<Desktop::View::CWindow>& window, const SWindowState& state, const Vector2D& point) const;
+    SP<Desktop::View::CWindow> windowAtVisualPoint(const Vector2D& point) const;
 
     // Constants
     static constexpr double ZOOM_MIN  = 0.1;
@@ -125,10 +137,12 @@ class CCanvas {
     bool m_pendingRefocus = false;
     int  m_pendingReassertFrames = 0;
 
-    // Hooks — only mouse input hooks needed (no render hooks!)
+    // Hooks — mouse input and hit-test hooks
     CFunctionHook* m_mouseWheelHook  = nullptr;
     CFunctionHook* m_mouseButtonHook = nullptr;
     CFunctionHook* m_mouseMovedHook  = nullptr;
+    CFunctionHook* m_windowHitHook   = nullptr;
+    CFunctionHook* m_surfaceHitHook  = nullptr;
 
     // IPC & Protected apps
     void emitIPCEvent(bool force = false);
