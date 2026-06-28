@@ -83,6 +83,8 @@ class CCanvas {
     void resetForWorkspaceChange();
     void persistWorkspaceState();
     void forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabilize);
+    void requestStabilize(bool refocus);
+    void stabilizeAfterEvent();
     bool windowOnCanvasWorkspace(const SP<Desktop::View::CWindow>& window) const;
     SP<Desktop::View::CWindow> activeCanvasWindow() const;
     SP<Desktop::View::CWindow> firstCanvasWindow() const;
@@ -113,6 +115,8 @@ class CCanvas {
     bool m_overviewActive = false;
     std::map<uint64_t, Vector2D> m_overviewSavedPos; // canvasPos before cluster rearrange
     double m_pinchStartZoom = 1.0;
+    bool m_pendingStabilize = false;
+    bool m_pendingRefocus = false;
 
     // Hooks — only mouse input hooks needed (no render hooks!)
     CFunctionHook* m_mouseWheelHook  = nullptr;
@@ -132,6 +136,7 @@ class CCanvas {
     CHyprSignalListener m_moveWindowWorkspaceListener;
     CHyprSignalListener m_openLayerListener;
     CHyprSignalListener m_closeLayerListener;
+    CHyprSignalListener m_tickListener;
     CHyprSignalListener m_workspaceActiveListener;
     CHyprSignalListener m_swipeBeginListener;
     CHyprSignalListener m_swipeUpdateListener;

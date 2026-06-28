@@ -17,7 +17,6 @@
 #include <cstdint>
 #include <cctype>
 #include <limits>
-#include <array>
 #include <vector>
 #include <linux/input-event-codes.h>
 
@@ -640,20 +639,13 @@ CCanvas::CCanvas() {
             onWindowOpen(w);
     });
     m_openLayerListener = Event::bus()->m_events.layer.opened.listen([this](PHLLS) {
-        if (!active)
-            return;
-
-        repositionWindows(ECommitMode::Warp);
-        persistWorkspaceState();
-        scheduleFrame();
+        requestStabilize(false);
     });
     m_closeLayerListener = Event::bus()->m_events.layer.closed.listen([this](PHLLS) {
-        if (!active)
-            return;
-
-        repositionWindows(ECommitMode::Warp);
-        persistWorkspaceState();
-        scheduleFrame();
+        requestStabilize(false);
+    });
+    m_tickListener = Event::bus()->m_events.tick.listen([this]() {
+        stabilizeAfterEvent();
     });
     m_workspaceActiveListener = Event::bus()->m_events.workspace.active.listen([this](PHLWORKSPACE ws) {
         if (!ws) return;
@@ -1308,20 +1300,49 @@ void CCanvas::forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabil
     }
 
     persistWorkspaceState();
+    if (stabilize)
+        requestStabilize(wasFocused);
+}
 
-    if (stabilize) {
-        if (wasFocused) {
-            auto next = firstCanvasWindow();
-            if (next) {
-                centerOnWindow(next, ECommitMode::Animate);
-                focusWindow(next);
-            }
+void CCanvas::requestStabilize(bool refocus) {
+    if (!active)
+        return;
+
+    m_pendingStabilize = true;
+    m_pendingRefocus = m_pendingRefocus || refocus;
+}
+
+void CCanvas::stabilizeAfterEvent() {
+    if (!active || !m_pendingStabilize)
+        return;
+
+    m_pendingStabilize = false;
+
+    if (m_savedStates.empty()) {
+        m_pendingRefocus = false;
+        m_overviewActive = false;
+        m_overviewSavedPos.clear();
+        persistWorkspaceState();
+        emitIPCEvent(true);
+        return;
+    }
+
+    if (m_pendingRefocus) {
+        auto next = firstCanvasWindow();
+        if (next) {
+            centerOnWindow(next, ECommitMode::Animate);
+            focusWindow(next);
         } else {
             repositionWindows(ECommitMode::Animate);
         }
-        scheduleFrame();
-        emitIPCEvent(true);
+    } else {
+        repositionWindows(ECommitMode::Animate);
     }
+
+    m_pendingRefocus = false;
+    persistWorkspaceState();
+    scheduleFrame();
+    emitIPCEvent(true);
 }
 
 bool CCanvas::windowOnCanvasWorkspace(const SP<Desktop::View::CWindow>& window) const {
@@ -1390,12 +1411,8 @@ void CCanvas::onWindowOpen(const SP<Desktop::View::CWindow>& w) {
     state.canvasPos = centerCanvas - initialSize / 2.0;
 
     m_savedStates[id] = state;
-
-    Vector2D screenPos = (state.canvasPos - offset) * zoom;
-    Vector2D screenSize = state.canvasSize * zoom;
-
-    commitWindow(w, screenPos, screenSize, ECommitMode::Animate);
     persistWorkspaceState();
+    requestStabilize(false);
 
     g_pHyprRenderer->damageWindow(w);
     scheduleFrame();
@@ -1493,53 +1510,47 @@ SDispatchResult dispatchOverview(std::string args) {
                 continue;
             }
 
-            // Find the candidate that keeps the whole cluster as compact as possible.
+            // Find best candidate position
             Vector2D bestPos = {0, 0};
-            double bestScore = std::numeric_limits<double>::max();
+            double bestDist = std::numeric_limits<double>::max();
             bool found = false;
 
+            // Helper to evaluate a candidate position
             auto evalCandidate = [&](const Vector2D& cand) {
                 if (overlaps(cand, e.size)) return;
-
-                const double nextMinX = std::min(minX, cand.x);
-                const double nextMaxX = std::max(maxX, cand.x + e.size.x);
-                const double nextMinY = std::min(minY, cand.y);
-                const double nextMaxY = std::max(maxY, cand.y + e.size.y);
-                const double nextW = nextMaxX - nextMinX;
-                const double nextH = nextMaxY - nextMinY;
-                const double area = nextW * nextH;
-                const double perimeter = nextW + nextH;
-                const double dist = (cand + e.size / 2.0).distance(targetCenter);
-
-                const double score = area + perimeter * GAP + dist * 0.05;
-                if (score < bestScore) {
-                    bestScore = score;
+                Vector2D candCenter = cand + e.size / 2.0;
+                double dist = candCenter.distance(targetCenter);
+                if (dist < bestDist) {
+                    bestDist = dist;
                     bestPos = cand;
                     found = true;
                 }
             };
 
             for (const auto& p : placed) {
-                const std::array<double, 5> xCandidates = {
-                    p.pos.x,
-                    p.pos.x + (p.size.x - e.size.x) / 2.0,
-                    p.pos.x + p.size.x - e.size.x,
-                    p.pos.x + p.size.x + GAP,
-                    p.pos.x - e.size.x - GAP,
-                };
-                const std::array<double, 5> yCandidates = {
-                    p.pos.y,
-                    p.pos.y + (p.size.y - e.size.y) / 2.0,
-                    p.pos.y + p.size.y - e.size.y,
-                    p.pos.y + p.size.y + GAP,
-                    p.pos.y - e.size.y - GAP,
-                };
+                // 1. Right of p
+                double rx = p.pos.x + p.size.x + GAP;
+                evalCandidate({ rx, p.pos.y }); // Align top
+                evalCandidate({ rx, p.pos.y + (p.size.y - e.size.y) / 2.0 }); // Align center
+                evalCandidate({ rx, p.pos.y + p.size.y - e.size.y }); // Align bottom
 
-                for (double x : xCandidates) {
-                    for (double y : yCandidates) {
-                        evalCandidate({x, y});
-                    }
-                }
+                // 2. Left of p
+                double lx = p.pos.x - (e.size.x + GAP);
+                evalCandidate({ lx, p.pos.y }); // Align top
+                evalCandidate({ lx, p.pos.y + (p.size.y - e.size.y) / 2.0 }); // Align center
+                evalCandidate({ lx, p.pos.y + p.size.y - e.size.y }); // Align bottom
+
+                // 3. Bottom of p
+                double by = p.pos.y + p.size.y + GAP;
+                evalCandidate({ p.pos.x, by }); // Align left
+                evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, by }); // Align center
+                evalCandidate({ p.pos.x + p.size.x - e.size.x, by }); // Align right
+
+                // 4. Top of p
+                double ty = p.pos.y - (e.size.y + GAP);
+                evalCandidate({ p.pos.x, ty }); // Align left
+                evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, ty }); // Align center
+                evalCandidate({ p.pos.x + p.size.x - e.size.x, ty }); // Align right
             }
 
             if (!found) {
