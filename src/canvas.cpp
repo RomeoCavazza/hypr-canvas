@@ -4,6 +4,7 @@
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
+#include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/managers/PointerManager.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/layout/LayoutManager.hpp>
@@ -13,6 +14,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdarg>
+#include <cstdint>
+#include <limits>
+#include <vector>
 #include <linux/input-event-codes.h>
 
 static void logf(const char* fmt, ...) {
@@ -69,7 +73,7 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
             const Vector2D center = {monSize.x / 2.0, monSize.y / 2.0};
 
             g_pCanvas->applyZoom(newZoom, center);
-            g_pCanvas->repositionWindows();
+            g_pCanvas->repositionWindows(ECommitMode::Warp);
 
             logf("[hypr-canvas] zoom=%.3f offset=(%.1f, %.1f)\n",
                  g_pCanvas->zoom, g_pCanvas->offset.x, g_pCanvas->offset.y);
@@ -195,7 +199,7 @@ static void hkOnMouseMoved(CInputManager* self, IPointer::SMotionEvent e) {
         // Pan: move viewport by mouse delta
         g_pCanvas->offset.x -= e.delta.x / g_pCanvas->zoom;
         g_pCanvas->offset.y -= e.delta.y / g_pCanvas->zoom;
-        g_pCanvas->repositionWindows();
+        g_pCanvas->repositionWindows(ECommitMode::Warp);
         scheduleFrame();
         return;
     }
@@ -205,7 +209,7 @@ static void hkOnMouseMoved(CInputManager* self, IPointer::SMotionEvent e) {
         if (it != g_pCanvas->m_savedStates.end()) {
             it->second.canvasPos.x += e.delta.x / g_pCanvas->zoom;
             it->second.canvasPos.y += e.delta.y / g_pCanvas->zoom;
-            g_pCanvas->repositionWindows();
+            g_pCanvas->repositionWindows(ECommitMode::Warp);
             scheduleFrame();
             return;
         }
@@ -216,7 +220,7 @@ static void hkOnMouseMoved(CInputManager* self, IPointer::SMotionEvent e) {
         if (it != g_pCanvas->m_savedStates.end()) {
             it->second.canvasSize.x = std::max(CCanvas::MIN_WINDOW_W, it->second.canvasSize.x + e.delta.x / g_pCanvas->zoom);
             it->second.canvasSize.y = std::max(CCanvas::MIN_WINDOW_H, it->second.canvasSize.y + e.delta.y / g_pCanvas->zoom);
-            g_pCanvas->repositionWindows();
+            g_pCanvas->repositionWindows(ECommitMode::Warp);
             scheduleFrame();
             return;
         }
@@ -228,6 +232,33 @@ static void hkOnMouseMoved(CInputManager* self, IPointer::SMotionEvent e) {
 
 // --- Dispatchers ---
 
+SDispatchResult dispatchEnter(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->workspaceChanged())
+        g_pCanvas->resetForWorkspaceChange();
+
+    if (!g_pCanvas->active) {
+        g_pCanvas->enter();
+        logf("[hypr-canvas] canvas ON\n");
+        scheduleFrame();
+    }
+    return {};
+}
+
+SDispatchResult dispatchExit(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->active) {
+        g_pCanvas->exit();
+        logf("[hypr-canvas] canvas OFF\n");
+        scheduleFrame();
+    }
+    return {};
+}
+
 SDispatchResult dispatchReset(std::string args) {
     if (g_pCanvas && g_pCanvas->workspaceChanged())
         g_pCanvas->resetForWorkspaceChange();
@@ -237,6 +268,78 @@ SDispatchResult dispatchReset(std::string args) {
         logf("[hypr-canvas] exit canvas mode\n");
         scheduleFrame();
     }
+    return {};
+}
+
+SDispatchResult dispatchHome(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->workspaceChanged())
+        g_pCanvas->resetForWorkspaceChange();
+
+    const bool wasActive = g_pCanvas->active;
+    auto preferred = Desktop::focusState()->window();
+
+    g_pCanvas->ensureActive();
+
+    if (!wasActive && preferred && g_pCanvas->windowOnCanvasWorkspace(preferred) &&
+        g_pCanvas->m_savedStates.contains((uint64_t)preferred.get())) {
+        g_pCanvas->centerOnWindow(preferred, ECommitMode::Animate);
+        g_pCanvas->focusWindow(preferred);
+        logf("[hypr-canvas] home enter-center id=%lx\n", (unsigned long)preferred.get());
+    } else {
+        g_pCanvas->home(ECommitMode::Animate);
+        logf("[hypr-canvas] home\n");
+    }
+
+    scheduleFrame();
+    return {};
+}
+
+SDispatchResult dispatchCenter(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->workspaceChanged())
+        g_pCanvas->resetForWorkspaceChange();
+
+    auto preferred = Desktop::focusState()->window();
+
+    g_pCanvas->ensureActive();
+
+    if (preferred && g_pCanvas->windowOnCanvasWorkspace(preferred) &&
+        g_pCanvas->m_savedStates.contains((uint64_t)preferred.get())) {
+        g_pCanvas->centerOnWindow(preferred, ECommitMode::Animate);
+        g_pCanvas->focusWindow(preferred);
+        logf("[hypr-canvas] center id=%lx\n", (unsigned long)preferred.get());
+    } else {
+        g_pCanvas->centerActive(ECommitMode::Animate);
+        logf("[hypr-canvas] center fallback\n");
+    }
+
+    scheduleFrame();
+    return {};
+}
+
+SDispatchResult dispatchNav(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->workspaceChanged())
+        g_pCanvas->resetForWorkspaceChange();
+
+    auto preferred = Desktop::focusState()->window();
+
+    g_pCanvas->ensureActive();
+
+    if (preferred && g_pCanvas->windowOnCanvasWorkspace(preferred) &&
+        g_pCanvas->m_savedStates.contains((uint64_t)preferred.get()))
+        g_pCanvas->focusWindow(preferred);
+
+    g_pCanvas->nav(args);
+    logf("[hypr-canvas] nav %s\n", args.c_str());
+    scheduleFrame();
     return {};
 }
 
@@ -260,7 +363,7 @@ SDispatchResult dispatchPan(std::string args) {
 
     g_pCanvas->offset.x += delta.x / g_pCanvas->zoom;
     g_pCanvas->offset.y += delta.y / g_pCanvas->zoom;
-    g_pCanvas->repositionWindows();
+    g_pCanvas->repositionWindows(ECommitMode::Warp);
     logf("[hypr-canvas] pan %s → offset=(%.1f, %.1f)\n",
          args.c_str(), g_pCanvas->offset.x, g_pCanvas->offset.y);
     scheduleFrame();
@@ -285,6 +388,8 @@ SDispatchResult dispatchZoom(std::string args) {
         newZoom *= CCanvas::ZOOM_STEP;
     else if (args == "out")
         newZoom /= CCanvas::ZOOM_STEP;
+    else if (args == "reset")
+        newZoom = 1.0;
     else
         return {};
 
@@ -292,10 +397,46 @@ SDispatchResult dispatchZoom(std::string args) {
         g_pCanvas->enter();
 
     g_pCanvas->applyZoom(newZoom, center);
-    g_pCanvas->repositionWindows();
+    g_pCanvas->repositionWindows(ECommitMode::Warp);
     logf("[hypr-canvas] zoom %s → %.3f\n", args.c_str(), g_pCanvas->zoom);
     scheduleFrame();
     return {};
+}
+
+SDispatchResult dispatchPin(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->workspaceChanged())
+        g_pCanvas->resetForWorkspaceChange();
+
+    g_pCanvas->ensureActive();
+    g_pCanvas->togglePin();
+    scheduleFrame();
+    return {};
+}
+
+SDispatchResult dispatchFloat(std::string args) {
+    auto dispatcher = g_pKeybindManager->m_dispatchers.find("togglefloating");
+    if (dispatcher == g_pKeybindManager->m_dispatchers.end())
+        return {};
+
+    SP<Desktop::View::CWindow> target;
+    if (g_pCanvas) {
+        if (g_pCanvas->workspaceChanged())
+            g_pCanvas->resetForWorkspaceChange();
+
+        if (g_pCanvas->active) {
+            target = g_pCanvas->activeCanvasWindow();
+            g_pCanvas->exit();
+
+            if (target)
+                g_pCanvas->focusWindow(target);
+        }
+    }
+
+    logf("[hypr-canvas] float handoff\n");
+    return dispatcher->second(args);
 }
 
 SDispatchResult dispatchToggle(std::string args) {
@@ -356,6 +497,15 @@ void CCanvas::enter() {
     if (!mon)
         return;
 
+    struct SEntry {
+        SP<Desktop::View::CWindow> window;
+        uint64_t id = 0;
+        Vector2D currentPos;
+        Vector2D currentSize;
+        Vector2D center;
+        bool wasFloating = false;
+    };
+
     active = true;
     zoom = 1.0;
     offset = {0, 0};
@@ -366,50 +516,83 @@ void CCanvas::enter() {
     m_resizingWindow = false;
     m_dragWindow = 0;
 
-    // Save all window positions and float them
+    std::vector<SEntry> entries;
+    std::vector<size_t> tiledEntries;
+    auto focused = Desktop::focusState()->window();
+
     for (auto& w : g_pCompositor->m_windows) {
         if (!w || w->isHidden() || !w->m_isMapped || !windowOnCanvasWorkspace(w))
             continue;
 
-        uint64_t id = (uint64_t)w.get();
-        const Vector2D currentPos  = w->m_realPosition->value();
-        const Vector2D currentSize = w->m_realSize->value();
+        SEntry entry;
+        entry.window = w;
+        entry.id = (uint64_t)w.get();
+        entry.currentPos = w->m_realPosition->value();
+        entry.currentSize = w->m_realSize->value();
+        entry.center = entry.currentPos + entry.currentSize / 2.0;
+        entry.wasFloating = w->m_isFloating;
+
+        if (!entry.wasFloating)
+            tiledEntries.push_back(entries.size());
+
+        entries.push_back(entry);
+    }
+
+    std::sort(tiledEntries.begin(), tiledEntries.end(), [&](size_t a, size_t b) {
+        const auto& ca = entries[a].center;
+        const auto& cb = entries[b].center;
+        if (std::abs(ca.x - cb.x) > 1.0)
+            return ca.x < cb.x;
+        return ca.y < cb.y;
+    });
+
+    size_t focusedTiledIndex = tiledEntries.empty() ? 0 : tiledEntries.size() / 2;
+    if (focused) {
+        for (size_t i = 0; i < tiledEntries.size(); ++i) {
+            if (entries[tiledEntries[i]].window == focused) {
+                focusedTiledIndex = i;
+                break;
+            }
+        }
+    }
+
+    const Vector2D baseCenter = monitorCenter();
+    const double stride = CANVAS_REF_W + CARD_GAP;
+
+    for (auto& entry : entries) {
+        auto& w = entry.window;
 
         SWindowState state;
-        state.restorePos  = currentPos;
-        state.restoreSize = currentSize;
-        state.wasFloating = w->m_isFloating;
+        state.restorePos  = entry.currentPos;
+        state.restoreSize = entry.currentSize;
+        state.wasFloating = entry.wasFloating;
 
-        if (w->m_isFloating) {
-            state.canvasPos  = currentPos;
-            state.canvasSize = currentSize;
+        if (entry.wasFloating) {
+            state.canvasPos  = entry.currentPos;
+            state.canvasSize = entry.currentSize;
         } else {
-            // Normalize tiled windows into independent canvas cards while
-            // preserving their visual center. This avoids the "everything is
-            // still tiled together" feeling when we zoom the canvas.
-            const Vector2D center = {
-                currentPos.x + currentSize.x / 2.0,
-                currentPos.y + currentSize.y / 2.0
+            auto it = std::find(tiledEntries.begin(), tiledEntries.end(), (size_t)(&entry - entries.data()));
+            const double rank = it == tiledEntries.end() ? 0.0 : (double)std::distance(tiledEntries.begin(), it) - (double)focusedTiledIndex;
+            const Vector2D cardCenter = {
+                baseCenter.x + rank * stride,
+                baseCenter.y,
             };
+
             state.canvasSize = {CANVAS_REF_W, CANVAS_REF_H};
             state.canvasPos = {
-                center.x - state.canvasSize.x / 2.0,
-                center.y - state.canvasSize.y / 2.0
+                cardCenter.x - state.canvasSize.x / 2.0,
+                cardCenter.y - state.canvasSize.y / 2.0
             };
         }
-        m_savedStates[id] = state;
+        m_savedStates[entry.id] = state;
 
         g_pHyprRenderer->damageWindow(w);
 
-        // Float the window if it's tiled
         if (!w->m_isFloating) {
             w->m_isFloating = true;
         }
 
-        w->m_realPosition->setValueAndWarp(state.canvasPos);
-        w->m_realSize->setValueAndWarp(state.canvasSize);
-        w->m_position = state.canvasPos;
-        w->m_size = state.canvasSize;
+        commitWindow(w, state.canvasPos, state.canvasSize, ECommitMode::Warp);
         g_pHyprRenderer->damageWindow(w);
     }
 
@@ -430,10 +613,7 @@ void CCanvas::exit() {
 
         const auto& saved = it->second;
         g_pHyprRenderer->damageWindow(w);
-        w->m_realPosition->setValueAndWarp(saved.restorePos);
-        w->m_realSize->setValueAndWarp(saved.restoreSize);
-        w->m_position = saved.restorePos;
-        w->m_size = saved.restoreSize;
+        commitWindow(w, saved.restorePos, saved.restoreSize, ECommitMode::Warp);
 
         if (!saved.wasFloating) {
             w->m_isFloating = false;
@@ -459,9 +639,233 @@ void CCanvas::exit() {
     logf("[hypr-canvas] exited canvas mode, restored windows\n");
 }
 
+void CCanvas::ensureActive() {
+    if (!active)
+        enter();
+}
+
+Vector2D CCanvas::screenToCanvas(const Vector2D& screen) const {
+    return offset + screen / zoom;
+}
+
+Vector2D CCanvas::canvasToScreen(const Vector2D& canvas) const {
+    return (canvas - offset) * zoom;
+}
+
+Vector2D CCanvas::monitorCenter() const {
+    auto mon = Desktop::focusState()->monitor();
+    if (!mon)
+        return {0, 0};
+
+    return {
+        mon->m_position.x + mon->m_transformedSize.x / 2.0,
+        mon->m_position.y + mon->m_transformedSize.y / 2.0,
+    };
+}
+
+void CCanvas::home(ECommitMode mode) {
+    zoom = 1.0;
+    offset = {0, 0};
+    repositionWindows(mode);
+}
+
+void CCanvas::centerActive(ECommitMode mode) {
+    centerOnWindow(activeCanvasWindow(), mode);
+}
+
+void CCanvas::nav(const std::string& direction) {
+    auto source = activeCanvasWindow();
+    if (!source)
+        return;
+
+    SP<Desktop::View::CWindow> target;
+    if (direction == "next" || direction == "n")
+        target = findCycleTarget(source, false);
+    else if (direction == "prev" || direction == "previous" || direction == "p")
+        target = findCycleTarget(source, true);
+    else
+        target = findDirectionalTarget(source, direction);
+
+    if (!target)
+        target = source;
+
+    centerOnWindow(target, ECommitMode::Animate);
+    focusWindow(target);
+}
+
+void CCanvas::togglePin() {
+    auto target = activeCanvasWindow();
+    if (!target)
+        return;
+
+    const uint64_t id = (uint64_t)target.get();
+    auto it = m_savedStates.find(id);
+    if (it == m_savedStates.end())
+        return;
+
+    it->second.pinned = !it->second.pinned;
+    if (!it->second.pinned) {
+        it->second.canvasPos = screenToCanvas(target->m_realPosition->value());
+        it->second.canvasSize = target->m_realSize->value() / zoom;
+    }
+
+    logf("[hypr-canvas] pin id=%lx pinned=%d\n", id, it->second.pinned ? 1 : 0);
+}
+
+SP<Desktop::View::CWindow> CCanvas::activeCanvasWindow() const {
+    auto focused = Desktop::focusState()->window();
+    if (focused && windowOnCanvasWorkspace(focused) && m_savedStates.contains((uint64_t)focused.get()))
+        return focused;
+
+    return firstCanvasWindow();
+}
+
+SP<Desktop::View::CWindow> CCanvas::firstCanvasWindow() const {
+    for (auto& w : g_pCompositor->m_windows) {
+        if (!w || w->isHidden() || !w->m_isMapped || !windowOnCanvasWorkspace(w))
+            continue;
+        if (m_savedStates.contains((uint64_t)w.get()))
+            return w;
+    }
+
+    return nullptr;
+}
+
+SP<Desktop::View::CWindow> CCanvas::findCycleTarget(const SP<Desktop::View::CWindow>& source, bool previous) const {
+    std::vector<SP<Desktop::View::CWindow>> windows;
+    for (auto& w : g_pCompositor->m_windows) {
+        if (!w || w->isHidden() || !w->m_isMapped || !windowOnCanvasWorkspace(w))
+            continue;
+
+        auto it = m_savedStates.find((uint64_t)w.get());
+        if (it != m_savedStates.end() && !it->second.pinned)
+            windows.push_back(w);
+    }
+
+    if (windows.empty())
+        return nullptr;
+
+    auto it = std::find(windows.begin(), windows.end(), source);
+    if (it == windows.end())
+        return windows.front();
+
+    const auto idx = (size_t)std::distance(windows.begin(), it);
+    if (previous)
+        return windows[(idx + windows.size() - 1) % windows.size()];
+
+    return windows[(idx + 1) % windows.size()];
+}
+
+SP<Desktop::View::CWindow> CCanvas::findDirectionalTarget(const SP<Desktop::View::CWindow>& source, const std::string& direction) const {
+    if (!source)
+        return nullptr;
+
+    const auto sourceIt = m_savedStates.find((uint64_t)source.get());
+    if (sourceIt == m_savedStates.end())
+        return nullptr;
+
+    const Vector2D sourceCenter = sourceIt->second.canvasPos + sourceIt->second.canvasSize / 2.0;
+    double bestScore = std::numeric_limits<double>::infinity();
+    SP<Desktop::View::CWindow> best;
+
+    for (auto& w : g_pCompositor->m_windows) {
+        if (!w || w == source || w->isHidden() || !w->m_isMapped || !windowOnCanvasWorkspace(w))
+            continue;
+
+        const auto it = m_savedStates.find((uint64_t)w.get());
+        if (it == m_savedStates.end() || it->second.pinned)
+            continue;
+
+        const Vector2D center = it->second.canvasPos + it->second.canvasSize / 2.0;
+        const double dx = center.x - sourceCenter.x;
+        const double dy = center.y - sourceCenter.y;
+
+        double axial = 0.0;
+        double lateral = 0.0;
+        if (direction == "left" || direction == "l") {
+            if (dx >= 0)
+                continue;
+            axial = -dx;
+            lateral = std::abs(dy);
+        } else if (direction == "right" || direction == "r") {
+            if (dx <= 0)
+                continue;
+            axial = dx;
+            lateral = std::abs(dy);
+        } else if (direction == "up" || direction == "u") {
+            if (dy >= 0)
+                continue;
+            axial = -dy;
+            lateral = std::abs(dx);
+        } else if (direction == "down" || direction == "d") {
+            if (dy <= 0)
+                continue;
+            axial = dy;
+            lateral = std::abs(dx);
+        } else {
+            return nullptr;
+        }
+
+        const double score = axial + (lateral * lateral) / (axial + 1.0);
+        if (score < bestScore) {
+            bestScore = score;
+            best = w;
+        }
+    }
+
+    return best;
+}
+
+void CCanvas::centerOnWindow(const SP<Desktop::View::CWindow>& window, ECommitMode mode) {
+    if (!window)
+        return;
+
+    auto it = m_savedStates.find((uint64_t)window.get());
+    if (it == m_savedStates.end())
+        return;
+
+    const Vector2D targetCenter = it->second.canvasPos + it->second.canvasSize / 2.0;
+    offset = targetCenter - monitorCenter() / zoom;
+    repositionWindows(mode);
+}
+
+void CCanvas::focusWindow(const SP<Desktop::View::CWindow>& window) const {
+    if (!window)
+        return;
+
+    auto dispatcher = g_pKeybindManager->m_dispatchers.find("focuswindow");
+    if (dispatcher == g_pKeybindManager->m_dispatchers.end())
+        return;
+
+    char arg[64];
+    std::snprintf(arg, sizeof(arg), "address:0x%lx", (unsigned long)window.get());
+    dispatcher->second(arg);
+}
+
+void CCanvas::commitWindow(const SP<Desktop::View::CWindow>& window, const Vector2D& pos, const Vector2D& size, ECommitMode mode) const {
+    if (!window)
+        return;
+
+    g_pHyprRenderer->damageWindow(window);
+
+    window->m_position = pos;
+    window->m_size = size;
+
+    if (mode == ECommitMode::Warp) {
+        window->m_realPosition->setValueAndWarp(pos);
+        window->m_realSize->setValueAndWarp(size);
+    } else {
+        *window->m_realPosition = pos;
+        *window->m_realSize = size;
+    }
+
+    window->sendWindowSize();
+    g_pHyprRenderer->damageWindow(window);
+}
+
 // --- Reposition all windows based on zoom+offset ---
 
-void CCanvas::repositionWindows() {
+void CCanvas::repositionWindows(ECommitMode mode) {
     for (auto& w : g_pCompositor->m_windows) {
         if (!w || w->isHidden() || !w->m_isMapped || !windowOnCanvasWorkspace(w))
             continue;
@@ -472,6 +876,8 @@ void CCanvas::repositionWindows() {
             continue;
 
         const auto& saved = it->second;
+        if (saved.pinned)
+            continue;
 
         // Canvas-to-screen: screenPos = (canvasPos - offset) * zoom
         Vector2D newPos = {
@@ -483,13 +889,7 @@ void CCanvas::repositionWindows() {
             saved.canvasSize.y * zoom
         };
 
-        // Damage both the old and new geometry to avoid stale-size ghosts.
-        g_pHyprRenderer->damageWindow(w);
-        w->m_realPosition->setValueAndWarp(newPos);
-        w->m_realSize->setValueAndWarp(newSize);
-        w->m_position = newPos;
-        w->m_size = newSize;
-        g_pHyprRenderer->damageWindow(w);
+        commitWindow(w, newPos, newSize, mode);
     }
 }
 

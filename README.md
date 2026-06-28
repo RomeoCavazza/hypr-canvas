@@ -1,95 +1,91 @@
-# hypr-canvas
+# hyprcanvas
 
-An infinite canvas plugin for [Hyprland](https://hyprland.org). Zoom out to see all your windows at once, pan around a vast virtual desktop, and zoom back in to work — like Google Maps for your desktop.
+Native C++ infinite canvas mode for Hyprland.
 
-> **⚠️ Super alpha.** This plugin hooks deep into Hyprland's internals. It may set your computer on fire, cause a divide by zero when maximizing an application, and form a black hole ending our universe. You have been warned.
+hyprcanvas turns one Hyprland workspace into a spatial plane: windows become persistent cards in virtual canvas coordinates, and the monitor becomes a camera controlled by `offset + zoom`.
 
-## Demo
+It is not a Niri clone, not a PaperWM layout, and not a full window manager. The scope is deliberately small: a clean canvas mode for Hyprland with native input hooks, no Python daemon, no `/dev/input` polling, and no IPC spam.
 
-**Super+Scroll** to zoom in/out. **Super+Left-Drag** on empty space to pan.
+## Design
 
-Works with both native Wayland apps and XWayland apps (Chrome, Discord, Electron).
+- One source of truth: every managed window has `canvasPos` and `canvasSize`.
+- Mouse movement is immediate: drag, resize, pan, and wheel zoom commit with `setValueAndWarp`.
+- Keyboard navigation is animated: `home`, `center`, and `nav` assign Hyprland animated variables and let the compositor move the world.
+- Focus is intentional: navigation picks a target, recenters the viewport, then asks Hyprland's native `focuswindow` dispatcher to focus it.
+- The mode is explicit: enter canvas, work spatially, exit back to the original tiling/floating state.
 
-## Install
+The current implementation follows the VXWM/Pedrito model: it physically moves windows as cards instead of trying to hook the entire renderer as a true camera transform.
 
-Requires Hyprland and its development headers. The plugin builds against whatever version you have installed — the ABI version is pulled from your headers at compile time.
+## Dispatchers
 
-```bash
-# build
+```conf
+canvas:toggle
+canvas:enter
+canvas:exit
+canvas:reset
+canvas:home
+canvas:center
+canvas:nav left|right|up|down|next|prev
+canvas:pan left|right|up|down
+canvas:zoom in|out|reset
+canvas:pin
+canvas:float
+```
+
+`canvas:reset` is kept as an alias for exit/reset compatibility.
+`canvas:float` is a canvas-aware wrapper around Hyprland's `togglefloating`: outside canvas mode it behaves like the native dispatcher; inside canvas mode it exits the workspace canvas cleanly, refocuses the active card, then toggles that window's floating state.
+
+## Suggested Binds
+
+```conf
+bind = SUPER, Z, canvas:toggle
+bind = SUPER, F, canvas:float
+bind = SUPER, R, canvas:home
+bind = SUPER, X, canvas:center
+
+bind = SUPER, left,  canvas:nav, left
+bind = SUPER, right, canvas:nav, right
+bind = SUPER, up,    canvas:nav, up
+bind = SUPER, down,  canvas:nav, down
+
+bind = SUPER ALT SHIFT, left,  canvas:pan, left
+bind = SUPER ALT SHIFT, right, canvas:pan, right
+bind = SUPER ALT SHIFT, up,    canvas:pan, up
+bind = SUPER ALT SHIFT, down,  canvas:pan, down
+
+bind = SUPER, minus, canvas:zoom, out
+bind = SUPER, equal, canvas:zoom, in
+```
+
+`SUPER + R` is intentionally contextual: outside canvas mode it enters canvas centered on the currently focused window; inside canvas mode it resets the camera to home.
+
+Mouse controls:
+
+- `SUPER + wheel`: zoom.
+- `SUPER + left drag` on empty space: pan.
+- In canvas mode, `SUPER + left drag` on a canvas window moves that card.
+- In canvas mode, `SUPER + right drag` on a canvas window resizes that card.
+
+## Build
+
+Requires Hyprland development headers matching the running compositor.
+
+```sh
 make
-
-# load into your running Hyprland session
-make install
-
-# or if you're iterating (bypasses dlopen cache)
-make reload
 ```
 
-To load it automatically, add to your `hyprland.conf`:
+Load manually:
 
-```
-plugin = /path/to/hypr-canvas.so
-```
-
-To unload:
-
-```bash
-make unload
+```sh
+hyprctl plugin load "$PWD/hypr-canvas.so"
 ```
 
-## How It Works
+Or configure Hyprland:
 
-The plugin hooks 12 functions inside Hyprland to intercept rendering, input, coordinate mapping, and popup positioning. No source patches needed — it's a pure plugin using `createFunctionHook`.
-
-### Coordinate Spaces
-
-```
-Physical space: monitor pixels (0,0)-(7680,2160)
-                hardware cursor always lives here
-                                    │
-                          position() hook
-                          offset + physical / zoom
-                                    │
-                                    ▼
-Canvas space:   infinite plane where windows exist
-                at their normal Hyprland positions
+```conf
+plugin = /absolute/path/to/hypr-canvas.so
 ```
 
-**Rendering** transforms canvas → physical: `screenPos = (canvasPos - offset) * zoom`
+## Status
 
-**Input** transforms physical → canvas: `canvasPos = offset + screenPos / zoom`
-
-### Hook Summary
-
-| Hook | What it does |
-|------|-------------|
-| `onMouseWheel` | Super+scroll → cursor-anchored zoom |
-| `onMouseButton` | Super+left-click on empty desktop → start/stop pan |
-| `onMouseMoved` | Pan drag via raw delta (divided by zoom for canvas-space movement) |
-| `position()` | Core coordinate remap — returns canvas coords to all 16 callers |
-| `closestValid()` | Disables cursor clamping so pointer can reach beyond monitor bounds |
-| `getMonitorFromCursor()` | Returns focused monitor when canvas coords are out of bounds |
-| `getMonitorFromVector()` | Same fallback for position-based lookups (vectorToWindowUnified etc.) |
-| `shouldRenderWindow()` | Forces all windows visible when zoomed out |
-| `CRenderPass::render()` | Expands damage region to full virtual viewport |
-| `renderAllClientsForWorkspace()` | Applies zoom transform via SRenderModifData + clears framebuffer |
-| `applyPositioning()` | Expands popup constraint box so menus aren't clamped to monitor |
-| `waylandToXWaylandCoords()` | Converts canvas→physical for XWayland apps (Chrome, Discord) |
-
-### Why So Many Hooks?
-
-Hyprland wasn't designed for viewport transforms. The compositor assumes cursor position = screen position = window position. Breaking that assumption requires intercepting every layer:
-
-- **Input layer**: the cursor must move 1:1 with the physical mouse, but all coordinate consumers need canvas-space values
-- **Rendering layer**: windows must be offset and scaled, damage regions expanded, render pass simplification disabled
-- **Protocol layer**: XWayland apps use absolute X11 coordinates mapped through a separate transform — needs its own hook
-- **UI layer**: popup menus (xdg_positioner) are constrained to the monitor — needs expanded bounds
-
-## Prior Work
-
-- **kwin-map**: KWin effect prototype that proved the concept. Hit API limits with input routing.
-- **driftwm**: Existing infinite canvas compositor in Rust/smithay. Can't drive ultrawide at native res (no DSC). The coordinate math patterns from driftwm informed our approach.
-
-## License
-
-MIT
+This is an alpha plugin against Hyprland internals. The 0.55.4-oriented branch is intentionally being rebuilt around a small, readable canvas-mode core before adding polish such as per-workspace persistence, protected apps, Waybar events, and richer overview affordances.

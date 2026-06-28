@@ -9,6 +9,11 @@
 
 #include <map>
 
+enum class ECommitMode {
+    Warp,
+    Animate,
+};
+
 // Saved window state for canvas mode
 struct SWindowState {
     Vector2D restorePos;
@@ -16,6 +21,7 @@ struct SWindowState {
     Vector2D canvasPos;
     Vector2D canvasSize;
     bool     wasFloating;
+    bool     pinned = false;
 };
 
 class CCanvas {
@@ -35,18 +41,35 @@ class CCanvas {
     // Enter/exit canvas mode
     void enter();
     void exit();
+    void ensureActive();
+
+    // Coordinate transforms
+    Vector2D screenToCanvas(const Vector2D& screen) const;
+    Vector2D canvasToScreen(const Vector2D& canvas) const;
+    Vector2D monitorCenter() const;
 
     // Apply zoom (cursor-anchored)
     void applyZoom(double newZoom, const Vector2D& anchorScreen);
 
     // Pan by delta in screen pixels
     void pan(const Vector2D& delta);
+    void home(ECommitMode mode);
+    void centerActive(ECommitMode mode);
+    void nav(const std::string& direction);
+    void togglePin();
 
     // Reposition all windows based on current zoom+offset
-    void repositionWindows();
+    void repositionWindows(ECommitMode mode);
     bool workspaceChanged() const;
     void resetForWorkspaceChange();
     bool windowOnCanvasWorkspace(const SP<Desktop::View::CWindow>& window) const;
+    SP<Desktop::View::CWindow> activeCanvasWindow() const;
+    SP<Desktop::View::CWindow> firstCanvasWindow() const;
+    SP<Desktop::View::CWindow> findDirectionalTarget(const SP<Desktop::View::CWindow>& source, const std::string& direction) const;
+    SP<Desktop::View::CWindow> findCycleTarget(const SP<Desktop::View::CWindow>& source, bool previous) const;
+    void centerOnWindow(const SP<Desktop::View::CWindow>& window, ECommitMode mode);
+    void focusWindow(const SP<Desktop::View::CWindow>& window) const;
+    void commitWindow(const SP<Desktop::View::CWindow>& window, const Vector2D& pos, const Vector2D& size, ECommitMode mode) const;
 
     // Constants
     static constexpr double ZOOM_MIN  = 0.1;
@@ -55,6 +78,7 @@ class CCanvas {
     static constexpr double PAN_STEP  = 120.0;
     static constexpr double CANVAS_REF_W = 939.0;
     static constexpr double CANVAS_REF_H = 1136.0;
+    static constexpr double CARD_GAP = 80.0;
     static constexpr double MIN_WINDOW_W = 160.0;
     static constexpr double MIN_WINDOW_H = 120.0;
 
