@@ -81,6 +81,8 @@ class CCanvas {
     void repositionWindows(ECommitMode mode);
     bool workspaceChanged() const;
     void resetForWorkspaceChange();
+    void persistWorkspaceState();
+    void forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabilize);
     bool windowOnCanvasWorkspace(const SP<Desktop::View::CWindow>& window) const;
     SP<Desktop::View::CWindow> activeCanvasWindow() const;
     SP<Desktop::View::CWindow> firstCanvasWindow() const;
@@ -127,6 +129,9 @@ class CCanvas {
     CHyprSignalListener m_destroyWindowListener;
     CHyprSignalListener m_closeWindowListener;
     CHyprSignalListener m_openWindowListener;
+    CHyprSignalListener m_moveWindowWorkspaceListener;
+    CHyprSignalListener m_openLayerListener;
+    CHyprSignalListener m_closeLayerListener;
     CHyprSignalListener m_workspaceActiveListener;
     CHyprSignalListener m_swipeBeginListener;
     CHyprSignalListener m_swipeUpdateListener;

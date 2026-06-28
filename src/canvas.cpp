@@ -621,23 +621,39 @@ CCanvas::CCanvas() {
     m_mouseMovedHook  = hookByName("onMouseMoved", (void*)&hkOnMouseMoved);
 
     m_destroyWindowListener = Event::bus()->m_events.window.destroy.listen([this](PHLWINDOW w) {
-        if (!w) return;
-        uint64_t id = (uint64_t)w.get();
-        m_savedStates.erase(id);
-        for (auto& [wsId, wsState] : m_workspaceStates) {
-            wsState.savedStates.erase(id);
-        }
+        forgetWindow(w, false);
     });
     m_closeWindowListener = Event::bus()->m_events.window.close.listen([this](PHLWINDOW w) {
-        if (!w) return;
-        uint64_t id = (uint64_t)w.get();
-        m_savedStates.erase(id);
-        for (auto& [wsId, wsState] : m_workspaceStates) {
-            wsState.savedStates.erase(id);
-        }
+        forgetWindow(w, true);
     });
     m_openWindowListener = Event::bus()->m_events.window.open.listen([this](PHLWINDOW w) {
         onWindowOpen(w);
+    });
+    m_moveWindowWorkspaceListener = Event::bus()->m_events.window.moveToWorkspace.listen([this](PHLWINDOW w, PHLWORKSPACE ws) {
+        if (!w || !ws)
+            return;
+
+        const uint64_t id = (uint64_t)w.get();
+        if (active && m_savedStates.contains(id) && ws->m_id != m_canvasWorkspace)
+            forgetWindow(w, true);
+        else if (active && ws->m_id == m_canvasWorkspace)
+            onWindowOpen(w);
+    });
+    m_openLayerListener = Event::bus()->m_events.layer.opened.listen([this](PHLLS) {
+        if (!active)
+            return;
+
+        repositionWindows(ECommitMode::Warp);
+        persistWorkspaceState();
+        scheduleFrame();
+    });
+    m_closeLayerListener = Event::bus()->m_events.layer.closed.listen([this](PHLLS) {
+        if (!active)
+            return;
+
+        repositionWindows(ECommitMode::Warp);
+        persistWorkspaceState();
+        scheduleFrame();
     });
     m_workspaceActiveListener = Event::bus()->m_events.workspace.active.listen([this](PHLWORKSPACE ws) {
         if (!ws) return;
@@ -1036,8 +1052,11 @@ void CCanvas::togglePin() {
 
 SP<Desktop::View::CWindow> CCanvas::activeCanvasWindow() const {
     auto focused = Desktop::focusState()->window();
-    if (focused && windowOnCanvasWorkspace(focused) && m_savedStates.contains((uint64_t)focused.get()))
-        return focused;
+    if (focused && windowOnCanvasWorkspace(focused)) {
+        auto it = m_savedStates.find((uint64_t)focused.get());
+        if (it != m_savedStates.end() && !it->second.pinned && !focused->m_pinned && !isProtectedApp(focused))
+            return focused;
+    }
 
     return firstCanvasWindow();
 }
@@ -1046,7 +1065,8 @@ SP<Desktop::View::CWindow> CCanvas::firstCanvasWindow() const {
     for (auto& w : g_pCompositor->m_windows) {
         if (!w || w->isHidden() || !w->m_isMapped || !windowOnCanvasWorkspace(w))
             continue;
-        if (m_savedStates.contains((uint64_t)w.get()))
+        auto it = m_savedStates.find((uint64_t)w.get());
+        if (it != m_savedStates.end() && !it->second.pinned && !w->m_pinned && !isProtectedApp(w))
             return w;
     }
 
@@ -1244,6 +1264,66 @@ void CCanvas::resetForWorkspaceChange() {
     exit();
 }
 
+void CCanvas::persistWorkspaceState() {
+    if (!active || m_canvasWorkspace == WORKSPACE_INVALID)
+        return;
+
+    auto& wsState = m_workspaceStates[m_canvasWorkspace];
+    wsState.savedStates = m_savedStates;
+    wsState.zoom = zoom;
+    wsState.offset = offset;
+    wsState.overviewActive = m_overviewActive;
+}
+
+void CCanvas::forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabilize) {
+    if (!window)
+        return;
+
+    const uint64_t id = (uint64_t)window.get();
+    const bool wasFocused = Desktop::focusState()->window() == window;
+    const bool wasManaged = m_savedStates.contains(id);
+
+    m_savedStates.erase(id);
+    m_overviewSavedPos.erase(id);
+    for (auto& [wsId, wsState] : m_workspaceStates) {
+        wsState.savedStates.erase(id);
+    }
+
+    if (m_dragWindow == id) {
+        m_panning = false;
+        m_movingWindow = false;
+        m_resizingWindow = false;
+        m_dragWindow = 0;
+    }
+
+    if (!active || !wasManaged)
+        return;
+
+    if (m_savedStates.empty()) {
+        m_overviewActive = false;
+        m_overviewSavedPos.clear();
+        persistWorkspaceState();
+        emitIPCEvent(true);
+        return;
+    }
+
+    persistWorkspaceState();
+
+    if (stabilize) {
+        if (wasFocused) {
+            auto next = firstCanvasWindow();
+            if (next) {
+                centerOnWindow(next, ECommitMode::Animate);
+                focusWindow(next);
+            }
+        } else {
+            repositionWindows(ECommitMode::Animate);
+        }
+        scheduleFrame();
+        emitIPCEvent(true);
+    }
+}
+
 bool CCanvas::windowOnCanvasWorkspace(const SP<Desktop::View::CWindow>& window) const {
     if (!window || !window->m_workspace)
         return false;
@@ -1315,6 +1395,7 @@ void CCanvas::onWindowOpen(const SP<Desktop::View::CWindow>& w) {
     Vector2D screenSize = state.canvasSize * zoom;
 
     commitWindow(w, screenPos, screenSize, ECommitMode::Animate);
+    persistWorkspaceState();
 
     g_pHyprRenderer->damageWindow(w);
     scheduleFrame();
