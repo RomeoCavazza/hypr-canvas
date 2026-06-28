@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstdint>
+#include <cctype>
 #include <limits>
 #include <vector>
 #include <linux/input-event-codes.h>
@@ -86,7 +87,7 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
                 g_pCanvas->enter();
 
             const double steps = (e.deltaDiscrete != 0) ? (double)e.deltaDiscrete / 120.0 : e.delta / 15.0;
-            const double zoomFactor = std::pow(1.10, std::abs(steps));
+            const double zoomFactor = std::pow(CCanvas::ZOOM_STEP, std::abs(steps));
             double       newZoom    = g_pCanvas->zoom;
             if (scrollDelta < 0)
                 newZoom *= zoomFactor;
@@ -380,6 +381,37 @@ SDispatchResult dispatchNav(std::string args) {
     return {};
 }
 
+// --- canvas:swap ----------------------------------------------------------
+// Context-aware window swap:
+//   canvas inactive → delegate to Hyprland swapwindow
+//   canvas active   → swap canvas position and size with directional target
+// -------------------------------------------------------------------------
+SDispatchResult dispatchSwap(std::string args) {
+    if (!g_pCanvas)
+        return {};
+
+    if (g_pCanvas->workspaceChanged())
+        g_pCanvas->resetForWorkspaceChange();
+
+    std::string swDir;
+    if      (args == "left")  swDir = "l";
+    else if (args == "right") swDir = "r";
+    else if (args == "up")    swDir = "u";
+    else if (args == "down")  swDir = "d";
+    else return {};
+
+    if (!g_pCanvas->active) {
+        auto it = g_pKeybindManager->m_dispatchers.find("swapwindow");
+        if (it != g_pKeybindManager->m_dispatchers.end())
+            it->second(swDir);
+        return {};
+    }
+
+    g_pCanvas->swap(args);
+    scheduleFrame();
+    return {};
+}
+
 // --- canvas:pan ------------------------------------------------------------
 // Explicit camera pan — only operates when canvas is already active.
 // Does NOT auto-enter canvas (use canvas:toggle for that).
@@ -426,9 +458,9 @@ SDispatchResult dispatchZoom(std::string args) {
 
     double newZoom = g_pCanvas->zoom;
     if (args == "in")
-        newZoom *= 1.10;
+        newZoom *= CCanvas::ZOOM_STEP;
     else if (args == "out")
-        newZoom /= 1.10;
+        newZoom /= CCanvas::ZOOM_STEP;
     else if (args == "reset")
         newZoom = 1.0;
     else
@@ -520,7 +552,9 @@ bool CCanvas::isProtectedApp(const SP<Desktop::View::CWindow>& window) const {
         auto it = std::search(
             str.begin(), str.end(),
             sub.begin(), sub.end(),
-            [](char ch1, char ch2) { return std::tolower(ch1) == std::tolower(ch2); }
+            [](unsigned char ch1, unsigned char ch2) {
+                return std::tolower(ch1) == std::tolower(ch2);
+            }
         );
         return it != str.end();
     };
@@ -553,7 +587,7 @@ bool CCanvas::isProtectedApp(const SP<Desktop::View::CWindow>& window) const {
         size_t last = token.find_last_not_of(' ');
         token = token.substr(first, (last - first + 1));
 
-        if (!token.empty() && (classname.find(token) != std::string::npos || title.find(token) != std::string::npos)) {
+        if (!token.empty() && (contains(classname, token) || contains(title, token))) {
             return true;
         }
     }
@@ -942,6 +976,42 @@ void CCanvas::nav(const std::string& direction) {
     focusWindow(target);
 }
 
+void CCanvas::swap(const std::string& direction) {
+    if (!active)
+        return;
+
+    auto source = activeCanvasWindow();
+    if (!source)
+        return;
+
+    auto target = findDirectionalTarget(source, direction);
+    if (!target || target == source)
+        return;
+
+    auto sourceIt = m_savedStates.find((uint64_t)source.get());
+    auto targetIt = m_savedStates.find((uint64_t)target.get());
+    if (sourceIt == m_savedStates.end() || targetIt == m_savedStates.end())
+        return;
+
+    if (sourceIt->second.pinned || targetIt->second.pinned)
+        return;
+
+    // Like drag from overview: an explicit edit accepts the packed shape.
+    if (m_overviewActive) {
+        m_overviewActive = false;
+        m_overviewSavedPos.clear();
+    }
+
+    std::swap(sourceIt->second.canvasPos, targetIt->second.canvasPos);
+    std::swap(sourceIt->second.canvasSize, targetIt->second.canvasSize);
+
+    centerOnWindow(source, ECommitMode::Animate);
+    focusWindow(source);
+    logf("[hypr-canvas] swap %s source=%lx target=%lx\n",
+         direction.c_str(), (unsigned long)source.get(), (unsigned long)target.get());
+    emitIPCEvent(true);
+}
+
 void CCanvas::togglePin() {
     auto target = activeCanvasWindow();
     if (!target)
@@ -1099,6 +1169,10 @@ void CCanvas::commitWindow(const SP<Desktop::View::CWindow>& window, const Vecto
 
     g_pHyprRenderer->damageWindow(window);
 
+    const bool sizeChanged =
+        std::abs(window->m_size.x - size.x) > 0.5 ||
+        std::abs(window->m_size.y - size.y) > 0.5;
+
     window->m_position = pos;
     window->m_size = size;
 
@@ -1110,7 +1184,9 @@ void CCanvas::commitWindow(const SP<Desktop::View::CWindow>& window, const Vecto
         *window->m_realSize = size;
     }
 
-    window->sendWindowSize();
+    if (sizeChanged)
+        window->sendWindowSize();
+
     g_pHyprRenderer->damageWindow(window);
 }
 

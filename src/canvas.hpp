@@ -74,6 +74,7 @@ class CCanvas {
     void centerActive(ECommitMode mode);
     void home(ECommitMode mode);
     void nav(const std::string& direction);
+    void swap(const std::string& direction);
     void togglePin();
 
     // Reposition all windows based on current zoom+offset
@@ -92,7 +93,7 @@ class CCanvas {
     // Constants
     static constexpr double ZOOM_MIN  = 0.1;
     static constexpr double ZOOM_MAX  = 2.0;
-    static constexpr double ZOOM_STEP = 1.03;
+    static constexpr double ZOOM_STEP = 1.06;
     static constexpr double PAN_STEP  = 120.0;
     static constexpr double CANVAS_REF_W = 939.0;
     static constexpr double CANVAS_REF_H = 1136.0;
