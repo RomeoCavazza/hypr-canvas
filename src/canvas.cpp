@@ -639,12 +639,10 @@ CCanvas::CCanvas() {
             onWindowOpen(w);
     });
     m_openLayerListener = Event::bus()->m_events.layer.opened.listen([this](PHLLS) {
-        logf("[hypr-canvas] layer opened: reasserting canvas geometry\n");
-        requestReassert();
+        logf("[hypr-canvas] layer opened: ignored by canvas\n");
     });
     m_closeLayerListener = Event::bus()->m_events.layer.closed.listen([this](PHLLS) {
-        logf("[hypr-canvas] layer closed: reasserting canvas geometry\n");
-        requestReassert();
+        logf("[hypr-canvas] layer closed: ignored by canvas\n");
     });
     m_tickListener = Event::bus()->m_events.tick.listen([this]() {
         stabilizeAfterEvent();
@@ -864,9 +862,7 @@ void CCanvas::enter() {
 
         g_pHyprRenderer->damageWindow(w);
 
-        if (!w->m_isFloating) {
-            w->m_isFloating = true;
-        }
+        setWindowFloating(w, true);
 
         Vector2D screenPos = (state.canvasPos - offset) * zoom;
         Vector2D screenSize = state.canvasSize * zoom;
@@ -909,9 +905,8 @@ void CCanvas::exit() {
         g_pHyprRenderer->damageWindow(w);
         commitWindow(w, saved.restorePos, saved.restoreSize, ECommitMode::Warp);
 
-        if (!saved.wasFloating) {
-            w->m_isFloating = false;
-        }
+        if (!saved.wasFloating)
+            setWindowFloating(w, false);
         g_pHyprRenderer->damageWindow(w);
     }
 
@@ -924,7 +919,6 @@ void CCanvas::exit() {
     m_movingWindow = false;
     m_resizingWindow = false;
     m_dragWindow = 0;
-    m_pendingReassertFrames = 0;
     m_overviewActive = false;
     m_overviewSavedPos.clear();
 
@@ -1193,11 +1187,29 @@ void CCanvas::focusWindow(const SP<Desktop::View::CWindow>& window) const {
     dispatcher->second(arg);
 }
 
+void CCanvas::setWindowFloating(const SP<Desktop::View::CWindow>& window, bool floating) const {
+    if (!window || window->m_isFloating == floating)
+        return;
+
+    const auto target = window->layoutTarget();
+    if (target && target->space()) {
+        g_layoutManager->changeFloatingMode(target);
+    }
+
+    // Fallback for transient windows whose layout target is not attached yet.
+    if (window->m_isFloating != floating)
+        window->m_isFloating = floating;
+}
+
 void CCanvas::commitWindow(const SP<Desktop::View::CWindow>& window, const Vector2D& pos, const Vector2D& size, ECommitMode mode) const {
     if (!window)
         return;
 
     g_pHyprRenderer->damageWindow(window);
+
+    const auto target = window->layoutTarget();
+    if (window->m_isFloating && target && target->space())
+        g_layoutManager->setTargetGeom(CBox{pos.x, pos.y, size.x, size.y}, target);
 
     const bool sizeChanged =
         std::abs(window->m_size.x - size.x) > 0.5 ||
@@ -1298,7 +1310,6 @@ void CCanvas::suspendForWorkspaceChange() {
     m_dragWindow = 0;
     m_pendingStabilize = false;
     m_pendingRefocus = false;
-    m_pendingReassertFrames = 0;
     m_overviewActive = false;
     m_overviewSavedPos.clear();
 
@@ -1339,9 +1350,6 @@ void CCanvas::forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabil
         m_dragWindow = 0;
     }
 
-    if (active && !wasManaged && (isProtectedApp(window) || windowOnCanvasWorkspace(window)))
-        requestReassert();
-
     if (!active || !wasManaged)
         return;
 
@@ -1366,21 +1374,14 @@ void CCanvas::requestStabilize(bool refocus) {
     m_pendingRefocus = m_pendingRefocus || refocus;
 }
 
-void CCanvas::requestReassert(int frames) {
-    if (!active)
-        return;
-
-    m_pendingReassertFrames = std::max(m_pendingReassertFrames, frames);
-}
-
 void CCanvas::stabilizeAfterEvent() {
-    if (!active || (!m_pendingStabilize && m_pendingReassertFrames <= 0))
+    if (!active || !m_pendingStabilize)
         return;
+
+    m_pendingStabilize = false;
 
     if (m_savedStates.empty()) {
-        m_pendingStabilize = false;
         m_pendingRefocus = false;
-        m_pendingReassertFrames = 0;
         m_overviewActive = false;
         m_overviewSavedPos.clear();
         persistWorkspaceState();
@@ -1388,30 +1389,20 @@ void CCanvas::stabilizeAfterEvent() {
         return;
     }
 
-    if (m_pendingStabilize) {
-        m_pendingStabilize = false;
-
-        if (m_pendingRefocus) {
-            auto next = firstCanvasWindow();
-            if (next) {
-                centerOnWindow(next, ECommitMode::Animate);
-                focusWindow(next);
-            } else {
-                repositionWindows(ECommitMode::Animate);
-            }
+    if (m_pendingRefocus) {
+        auto next = firstCanvasWindow();
+        if (next) {
+            centerOnWindow(next, ECommitMode::Animate);
+            focusWindow(next);
         } else {
             repositionWindows(ECommitMode::Animate);
         }
-
-        m_pendingRefocus = false;
-        persistWorkspaceState();
+    } else {
+        repositionWindows(ECommitMode::Animate);
     }
 
-    if (m_pendingReassertFrames > 0) {
-        --m_pendingReassertFrames;
-        repositionWindows(ECommitMode::Warp);
-    }
-
+    m_pendingRefocus = false;
+    persistWorkspaceState();
     scheduleFrame();
     emitIPCEvent(true);
 }
@@ -1452,12 +1443,7 @@ void CCanvas::pan(const Vector2D& delta) {
 void CCanvas::onWindowOpen(const SP<Desktop::View::CWindow>& w) {
     if (!active || !w) return;
 
-    if (isProtectedApp(w)) {
-        requestReassert();
-        return;
-    }
-
-    if (w->isHidden() || !windowOnCanvasWorkspace(w))
+    if (isProtectedApp(w) || w->isHidden() || !windowOnCanvasWorkspace(w))
         return;
 
     uint64_t id = (uint64_t)w.get();
@@ -1467,7 +1453,7 @@ void CCanvas::onWindowOpen(const SP<Desktop::View::CWindow>& w) {
     logf("[hypr-canvas] new window opened while canvas active: id=%lx class=%s title=%s\n",
          id, w->m_class.c_str(), w->m_title.c_str());
 
-    w->m_isFloating = true;
+    setWindowFloating(w, true);
 
     SWindowState state;
     state.restorePos = w->m_realPosition->value();

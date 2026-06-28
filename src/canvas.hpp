@@ -87,7 +87,6 @@ class CCanvas {
     void persistWorkspaceState();
     void forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabilize);
     void requestStabilize(bool refocus);
-    void requestReassert(int frames = 6);
     void stabilizeAfterEvent();
     bool windowOnCanvasWorkspace(const SP<Desktop::View::CWindow>& window) const;
     SP<Desktop::View::CWindow> activeCanvasWindow() const;
@@ -96,6 +95,7 @@ class CCanvas {
     SP<Desktop::View::CWindow> findCycleTarget(const SP<Desktop::View::CWindow>& source, bool previous) const;
     void centerOnWindow(const SP<Desktop::View::CWindow>& window, ECommitMode mode);
     void focusWindow(const SP<Desktop::View::CWindow>& window) const;
+    void setWindowFloating(const SP<Desktop::View::CWindow>& window, bool floating) const;
     void commitWindow(const SP<Desktop::View::CWindow>& window, const Vector2D& pos, const Vector2D& size, ECommitMode mode) const;
 
     // Constants
@@ -121,7 +121,6 @@ class CCanvas {
     double m_pinchStartZoom = 1.0;
     bool m_pendingStabilize = false;
     bool m_pendingRefocus = false;
-    int  m_pendingReassertFrames = 0;
 
     // Hooks — only mouse input hooks needed (no render hooks!)
     CFunctionHook* m_mouseWheelHook  = nullptr;
