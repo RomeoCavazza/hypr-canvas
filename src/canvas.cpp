@@ -303,31 +303,6 @@ SDispatchResult dispatchReset(std::string args) {
     return {};
 }
 
-SDispatchResult dispatchHome(std::string args) {
-    if (!g_pCanvas)
-        return {};
-
-    if (g_pCanvas->workspaceChanged())
-        g_pCanvas->resetForWorkspaceChange();
-
-    const bool wasActive = g_pCanvas->active;
-    auto preferred = Desktop::focusState()->window();
-
-    g_pCanvas->ensureActive();
-
-    if (!wasActive && preferred && g_pCanvas->windowOnCanvasWorkspace(preferred) &&
-        g_pCanvas->m_savedStates.contains((uint64_t)preferred.get())) {
-        g_pCanvas->centerOnWindow(preferred, ECommitMode::Animate);
-        g_pCanvas->focusWindow(preferred);
-        logf("[hypr-canvas] home enter-center id=%lx\n", (unsigned long)preferred.get());
-    } else {
-        g_pCanvas->home(ECommitMode::Animate);
-        logf("[hypr-canvas] home\n");
-    }
-
-    scheduleFrame();
-    return {};
-}
 
 SDispatchResult dispatchCenter(std::string args) {
     if (!g_pCanvas)
@@ -823,11 +798,6 @@ Vector2D CCanvas::monitorCenter() const {
     return mon->m_position + mon->m_size / 2.0;
 }
 
-void CCanvas::home(ECommitMode mode) {
-    zoom = 1.0;
-    offset = {0, 0};
-    repositionWindows(mode);
-}
 
 void CCanvas::centerActive(ECommitMode mode) {
     centerOnWindow(activeCanvasWindow(), mode);
