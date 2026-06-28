@@ -1279,10 +1279,6 @@ void CCanvas::detachWindowTransformer(const SP<Desktop::View::CWindow>& window) 
 void CCanvas::detachAllWindowTransformers() const {
 }
 
-bool CCanvas::rendersAtNativeSize(const SP<Desktop::View::CWindow>& window) const {
-    return active && window && Desktop::focusState()->window() == window;
-}
-
 Vector2D CCanvas::logicalWindowPos(const SWindowState& state) const {
     return canvasToScreen(state.canvasPos);
 }
@@ -1297,9 +1293,6 @@ Vector2D CCanvas::visualWindowPos(const SP<Desktop::View::CWindow>& window, cons
 }
 
 Vector2D CCanvas::visualWindowSize(const SP<Desktop::View::CWindow>& window, const SWindowState& state) const {
-    if (rendersAtNativeSize(window))
-        return state.canvasSize;
-
     return canvasSizeToScreen(state.canvasSize);
 }
 

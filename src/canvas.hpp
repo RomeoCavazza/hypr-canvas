@@ -103,7 +103,6 @@ class CCanvas {
     void attachWindowTransformer(const SP<Desktop::View::CWindow>& window) const;
     void detachWindowTransformer(const SP<Desktop::View::CWindow>& window) const;
     void detachAllWindowTransformers() const;
-    bool rendersAtNativeSize(const SP<Desktop::View::CWindow>& window) const;
     Vector2D logicalWindowPos(const SWindowState& state) const;
     Vector2D logicalWindowSize(const SWindowState& state) const;
     Vector2D visualWindowPos(const SP<Desktop::View::CWindow>& window, const SWindowState& state) const;
