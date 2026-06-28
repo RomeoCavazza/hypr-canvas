@@ -32,6 +32,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:pin",    dispatchPin);
     HyprlandAPI::addDispatcherV2(PHANDLE, "canvas:float",  dispatchFloat);
 
+    HyprlandAPI::addConfigValue(PHANDLE, "plugin:canvas:protected_apps", Hyprlang::STRING{(char*)""});
+    HyprlandAPI::addConfigValue(PHANDLE, "plugin:canvas:debug", Hyprlang::INT{0});
+    HyprlandAPI::addConfigValue(PHANDLE, "plugin:canvas:nav_cooldown_ms", Hyprlang::INT{150});
+
     g_pCanvas = std::make_unique<CCanvas>();
 
     return {"hypr-canvas", "VXWM-style infinite canvas — physically moves windows", "Aaron+tco", "0.3"};

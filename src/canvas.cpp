@@ -19,7 +19,25 @@
 #include <vector>
 #include <linux/input-event-codes.h>
 
+static int getCfgInt(const std::string &key, int fallback) {
+    if (!PHANDLE) return fallback;
+    auto *cv = HyprlandAPI::getConfigValue(PHANDLE, key);
+    if (!cv || !cv->dataPtr())
+        return fallback;
+    return *static_cast<Hyprlang::INT *>(cv->dataPtr());
+}
+
+static std::string getCfgString(const std::string &key, const std::string &fallback) {
+    if (!PHANDLE) return fallback;
+    auto *cv = HyprlandAPI::getConfigValue(PHANDLE, key);
+    if (!cv || !cv->dataPtr())
+        return fallback;
+    const auto* str = static_cast<Hyprlang::STRING *>(cv->dataPtr());
+    return str && *str ? std::string{*str} : fallback;
+}
+
 static void logf(const char* fmt, ...) {
+    if (getCfgInt("plugin:canvas:debug", 0) == 0) return;
     FILE* f = fopen("/tmp/hypr-canvas.log", "a");
     if (!f) return;
     va_list args;
@@ -154,6 +172,7 @@ static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e, SP<IP
     if (g_pCanvas && g_pCanvas->m_panning && e.button == BTN_LEFT && e.state == WL_POINTER_BUTTON_STATE_RELEASED) {
         g_pCanvas->m_panning = false;
         logf("[hypr-canvas] pan stop\n");
+        g_pCanvas->emitIPCEvent(true);
         return;
     }
 
@@ -161,6 +180,7 @@ static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e, SP<IP
         logf("[hypr-canvas] window move stop id=%lx\n", g_pCanvas->m_dragWindow);
         g_pCanvas->m_movingWindow = false;
         g_pCanvas->m_dragWindow = 0;
+        g_pCanvas->emitIPCEvent(true);
         return;
     }
 
@@ -168,6 +188,7 @@ static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e, SP<IP
         logf("[hypr-canvas] window resize stop id=%lx\n", g_pCanvas->m_dragWindow);
         g_pCanvas->m_resizingWindow = false;
         g_pCanvas->m_dragWindow = 0;
+        g_pCanvas->emitIPCEvent(true);
         return;
     }
 
@@ -468,17 +489,67 @@ static CFunctionHook* hookByName(const std::string& name, void* dest) {
     return hook;
 }
 
+bool CCanvas::isProtectedApp(const SP<Desktop::View::CWindow>& window) const {
+    if (!window) return false;
+    std::string protectedApps = getCfgString("plugin:canvas:protected_apps", "");
+    if (protectedApps.empty()) return false;
+
+    std::string classname = window->m_initialClass;
+    std::string title = window->m_initialTitle;
+
+    std::stringstream ss(protectedApps);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        size_t first = token.find_first_not_of(' ');
+        if (first == std::string::npos) continue;
+        size_t last = token.find_last_not_of(' ');
+        token = token.substr(first, (last - first + 1));
+
+        if (!token.empty() && (classname.find(token) != std::string::npos || title.find(token) != std::string::npos)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void CCanvas::emitIPCEvent(bool force) {
+    if (!g_pEventManager) return;
+    static std::chrono::steady_clock::time_point lastEmit;
+    static std::string lastPayload;
+
+    std::string payload = std::format("{},{:.2f},{:.1f},{:.1f}", active ? 1 : 0, zoom, offset.x, offset.y);
+    if (!force && payload == lastPayload) return;
+
+    auto now = std::chrono::steady_clock::now();
+    if (!force && std::chrono::duration_cast<std::chrono::milliseconds>(now - lastEmit).count() < 33) {
+        return;
+    }
+
+    lastEmit = now;
+    lastPayload = payload;
+    g_pEventManager->postEvent({ "canvas", payload });
+}
+
 // --- Constructor / Destructor ---
 
 CCanvas::CCanvas() {
     m_mouseWheelHook  = hookByName("onMouseWheel", (void*)&hkOnMouseWheel);
     m_mouseButtonHook = hookByName("onMouseButton", (void*)&hkOnMouseButton);
     m_mouseMovedHook  = hookByName("onMouseMoved", (void*)&hkOnMouseMoved);
+
+    m_destroyWindowListener = Event::bus()->m_events.window.destroy.listen([this](PHLWINDOW w) {
+        if (!w) return;
+        m_savedStates.erase((uint64_t)w.get());
+    });
+    m_closeWindowListener = Event::bus()->m_events.window.close.listen([this](PHLWINDOW w) {
+        if (!w) return;
+        m_savedStates.erase((uint64_t)w.get());
+    });
+
     logf("[hypr-canvas] initialized (VXWM mode — no render hooks)\n");
 }
 
 CCanvas::~CCanvas() {
-    // Restore windows if still in canvas mode
     if (active)
         exit();
 
@@ -566,6 +637,14 @@ void CCanvas::enter() {
         state.restorePos  = entry.currentPos;
         state.restoreSize = entry.currentSize;
         state.wasFloating = entry.wasFloating;
+        state.pinned      = (w->m_pinned || isProtectedApp(w));
+
+        if (state.pinned) {
+            state.canvasPos  = entry.currentPos;
+            state.canvasSize = entry.currentSize;
+            m_savedStates[entry.id] = state;
+            continue;
+        }
 
         if (entry.wasFloating) {
             state.canvasPos  = entry.currentPos;
@@ -598,6 +677,7 @@ void CCanvas::enter() {
 
     logf("[hypr-canvas] entered canvas mode on workspace %ld, saved %zu windows\n",
          (long)m_canvasWorkspace, m_savedStates.size());
+    emitIPCEvent(true);
 }
 
 void CCanvas::exit() {
@@ -612,6 +692,9 @@ void CCanvas::exit() {
             continue;
 
         const auto& saved = it->second;
+        if (saved.pinned || w->m_pinned || isProtectedApp(w))
+            continue;
+
         g_pHyprRenderer->damageWindow(w);
         commitWindow(w, saved.restorePos, saved.restoreSize, ECommitMode::Warp);
 
@@ -637,6 +720,7 @@ void CCanvas::exit() {
         g_layoutManager->recalculateMonitor(mon);
 
     logf("[hypr-canvas] exited canvas mode, restored windows\n");
+    emitIPCEvent(true);
 }
 
 void CCanvas::ensureActive() {
@@ -674,6 +758,18 @@ void CCanvas::centerActive(ECommitMode mode) {
 }
 
 void CCanvas::nav(const std::string& direction) {
+    if (!active)
+        return;
+
+    int cooldownMs = getCfgInt("plugin:canvas:nav_cooldown_ms", 150);
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastNavTime).count();
+    if (elapsed < cooldownMs) {
+        logf("[hypr-canvas] nav throttled by cooldown (%ld ms < %d ms)\n", (long)elapsed, cooldownMs);
+        return;
+    }
+    m_lastNavTime = now;
+
     auto source = activeCanvasWindow();
     if (!source)
         return;
@@ -704,12 +800,14 @@ void CCanvas::togglePin() {
         return;
 
     it->second.pinned = !it->second.pinned;
+    target->m_pinned = it->second.pinned;
     if (!it->second.pinned) {
         it->second.canvasPos = screenToCanvas(target->m_realPosition->value());
         it->second.canvasSize = target->m_realSize->value() / zoom;
     }
 
     logf("[hypr-canvas] pin id=%lx pinned=%d\n", id, it->second.pinned ? 1 : 0);
+    emitIPCEvent(true);
 }
 
 SP<Desktop::View::CWindow> CCanvas::activeCanvasWindow() const {
@@ -876,7 +974,7 @@ void CCanvas::repositionWindows(ECommitMode mode) {
             continue;
 
         const auto& saved = it->second;
-        if (saved.pinned)
+        if (saved.pinned || w->m_pinned || isProtectedApp(w))
             continue;
 
         // Canvas-to-screen: screenPos = (canvasPos - offset) * zoom
@@ -891,6 +989,7 @@ void CCanvas::repositionWindows(ECommitMode mode) {
 
         commitWindow(w, newPos, newSize, mode);
     }
+    emitIPCEvent();
 }
 
 bool CCanvas::workspaceChanged() const {

@@ -5,9 +5,15 @@
 #include <hyprland/src/helpers/math/Math.hpp>
 #include <hyprland/src/SharedDefs.hpp>
 #include <hyprland/src/devices/IPointer.hpp>
+#include <hyprland/src/managers/EventManager.hpp>
+#include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/helpers/signal/Signal.hpp>
 #include <hyprutils/memory/SharedPtr.hpp>
 
+#include <chrono>
 #include <map>
+#include <string>
+#include <sstream>
 
 enum class ECommitMode {
     Warp,
@@ -92,6 +98,15 @@ class CCanvas {
     CFunctionHook* m_mouseWheelHook  = nullptr;
     CFunctionHook* m_mouseButtonHook = nullptr;
     CFunctionHook* m_mouseMovedHook  = nullptr;
+
+    // IPC & Protected apps
+    void emitIPCEvent(bool force = false);
+    bool isProtectedApp(const SP<Desktop::View::CWindow>& window) const;
+
+    // Cooldown & Signal listeners
+    std::chrono::steady_clock::time_point m_lastNavTime;
+    CHyprSignalListener m_destroyWindowListener;
+    CHyprSignalListener m_closeWindowListener;
 };
 
 inline std::unique_ptr<CCanvas> g_pCanvas;
