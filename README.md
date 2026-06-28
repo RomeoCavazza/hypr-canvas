@@ -4,9 +4,9 @@
 [![Release](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/release.yml/badge.svg)](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/release.yml)
 [![Hyprland](https://img.shields.io/badge/Hyprland-v0.55.4-58E1FF)](https://github.com/hyprwm/Hyprland/releases/tag/v0.55.4)
 
-<video src="./assets/showcase.mp4" controls width="100%"></video>
-
 Native C++ infinite canvas mode for Hyprland.
+
+<video src="https://github.com/RomeoCavazza/hypr-canvas/raw/main/assets/showcase.mp4" controls="controls" width="100%"></video>
 
 hyprcanvas turns one Hyprland workspace into a spatial plane: windows become persistent cards in virtual canvas coordinates, and the monitor becomes a camera controlled by `offset + zoom`.
 
@@ -34,7 +34,7 @@ canvas:overview
 
 ### Closer Look
 
-<video src="./assets/demo.mp4" controls width="100%"></video>
+<video src="https://github.com/RomeoCavazza/hypr-canvas/raw/main/assets/demo.mp4" controls="controls" width="100%"></video>
 
 ## Configuration
 
