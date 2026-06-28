@@ -87,6 +87,7 @@ class CCanvas {
     void persistWorkspaceState();
     void forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabilize);
     void requestStabilize(bool refocus);
+    void requestReassert(int frames = 6);
     void stabilizeAfterEvent();
     bool windowOnCanvasWorkspace(const SP<Desktop::View::CWindow>& window) const;
     SP<Desktop::View::CWindow> activeCanvasWindow() const;
@@ -121,6 +122,7 @@ class CCanvas {
     double m_pinchStartZoom = 1.0;
     bool m_pendingStabilize = false;
     bool m_pendingRefocus = false;
+    int  m_pendingReassertFrames = 0;
 
     // Hooks — only mouse input hooks needed (no render hooks!)
     CFunctionHook* m_mouseWheelHook  = nullptr;

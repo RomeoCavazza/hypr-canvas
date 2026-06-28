@@ -52,7 +52,7 @@
     devShells = forHyprlandSystems (system: pkgs: {
       default = pkgs.mkShell {
         name = "hypr-canvas-dev";
-        nativeBuildInputs = with pkgs; [clang-tools_16];
+        nativeBuildInputs = with pkgs; [clang-tools];
         inputsFrom = [self.packages.${system}.hypr-canvas];
       };
     });
