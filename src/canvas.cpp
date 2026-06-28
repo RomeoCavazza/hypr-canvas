@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cctype>
 #include <limits>
+#include <array>
 #include <vector>
 #include <linux/input-event-codes.h>
 
@@ -1411,47 +1412,53 @@ SDispatchResult dispatchOverview(std::string args) {
                 continue;
             }
 
-            // Find best candidate position
+            // Find the candidate that keeps the whole cluster as compact as possible.
             Vector2D bestPos = {0, 0};
-            double bestDist = std::numeric_limits<double>::max();
+            double bestScore = std::numeric_limits<double>::max();
             bool found = false;
 
-            // Helper to evaluate a candidate position
             auto evalCandidate = [&](const Vector2D& cand) {
                 if (overlaps(cand, e.size)) return;
-                Vector2D candCenter = cand + e.size / 2.0;
-                double dist = candCenter.distance(targetCenter);
-                if (dist < bestDist) {
-                    bestDist = dist;
+
+                const double nextMinX = std::min(minX, cand.x);
+                const double nextMaxX = std::max(maxX, cand.x + e.size.x);
+                const double nextMinY = std::min(minY, cand.y);
+                const double nextMaxY = std::max(maxY, cand.y + e.size.y);
+                const double nextW = nextMaxX - nextMinX;
+                const double nextH = nextMaxY - nextMinY;
+                const double area = nextW * nextH;
+                const double perimeter = nextW + nextH;
+                const double dist = (cand + e.size / 2.0).distance(targetCenter);
+
+                const double score = area + perimeter * GAP + dist * 0.05;
+                if (score < bestScore) {
+                    bestScore = score;
                     bestPos = cand;
                     found = true;
                 }
             };
 
             for (const auto& p : placed) {
-                // 1. Right of p
-                double rx = p.pos.x + p.size.x + GAP;
-                evalCandidate({ rx, p.pos.y }); // Align top
-                evalCandidate({ rx, p.pos.y + (p.size.y - e.size.y) / 2.0 }); // Align center
-                evalCandidate({ rx, p.pos.y + p.size.y - e.size.y }); // Align bottom
+                const std::array<double, 5> xCandidates = {
+                    p.pos.x,
+                    p.pos.x + (p.size.x - e.size.x) / 2.0,
+                    p.pos.x + p.size.x - e.size.x,
+                    p.pos.x + p.size.x + GAP,
+                    p.pos.x - e.size.x - GAP,
+                };
+                const std::array<double, 5> yCandidates = {
+                    p.pos.y,
+                    p.pos.y + (p.size.y - e.size.y) / 2.0,
+                    p.pos.y + p.size.y - e.size.y,
+                    p.pos.y + p.size.y + GAP,
+                    p.pos.y - e.size.y - GAP,
+                };
 
-                // 2. Left of p
-                double lx = p.pos.x - (e.size.x + GAP);
-                evalCandidate({ lx, p.pos.y }); // Align top
-                evalCandidate({ lx, p.pos.y + (p.size.y - e.size.y) / 2.0 }); // Align center
-                evalCandidate({ lx, p.pos.y + p.size.y - e.size.y }); // Align bottom
-
-                // 3. Bottom of p
-                double by = p.pos.y + p.size.y + GAP;
-                evalCandidate({ p.pos.x, by }); // Align left
-                evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, by }); // Align center
-                evalCandidate({ p.pos.x + p.size.x - e.size.x, by }); // Align right
-
-                // 4. Top of p
-                double ty = p.pos.y - (e.size.y + GAP);
-                evalCandidate({ p.pos.x, ty }); // Align left
-                evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, ty }); // Align center
-                evalCandidate({ p.pos.x + p.size.x - e.size.x, ty }); // Align right
+                for (double x : xCandidates) {
+                    for (double y : yCandidates) {
+                        evalCandidate({x, y});
+                    }
+                }
             }
 
             if (!found) {
