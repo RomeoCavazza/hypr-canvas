@@ -639,10 +639,10 @@ CCanvas::CCanvas() {
             onWindowOpen(w);
     });
     m_openLayerListener = Event::bus()->m_events.layer.opened.listen([this](PHLLS) {
-        requestStabilize(false);
+        logf("[hypr-canvas] layer opened: ignored by canvas\n");
     });
     m_closeLayerListener = Event::bus()->m_events.layer.closed.listen([this](PHLLS) {
-        requestStabilize(false);
+        logf("[hypr-canvas] layer closed: ignored by canvas\n");
     });
     m_tickListener = Event::bus()->m_events.tick.listen([this]() {
         stabilizeAfterEvent();
@@ -650,9 +650,15 @@ CCanvas::CCanvas() {
     m_workspaceActiveListener = Event::bus()->m_events.workspace.active.listen([this](PHLWORKSPACE ws) {
         if (!ws) return;
         if (active && ws->m_id != m_canvasWorkspace) {
-            logf("[hypr-canvas] workspace switched (active on %ld, switched to %ld), auto-exiting canvas on old workspace\n",
+            logf("[hypr-canvas] workspace switched (active on %ld, switched to %ld), suspending canvas session\n",
                  (long)m_canvasWorkspace, (long)ws->m_id);
-            exit();
+            suspendForWorkspaceChange();
+        }
+
+        auto stateIt = m_workspaceStates.find(ws->m_id);
+        if (!active && stateIt != m_workspaceStates.end() && stateIt->second.resumeOnWorkspaceFocus) {
+            logf("[hypr-canvas] resuming suspended canvas session on workspace %ld\n", (long)ws->m_id);
+            enter();
         }
     });
 
@@ -740,9 +746,11 @@ void CCanvas::enter() {
 
     // Fetch or initialize workspace state (shape memory)
     auto& wsState = m_workspaceStates[m_canvasWorkspace];
+    const bool resumingSuspended = wsState.resumeOnWorkspaceFocus;
     zoom = wsState.zoom;
     offset = wsState.offset;
     m_overviewActive = wsState.overviewActive;
+    m_overviewSavedPos = wsState.overviewSavedPos;
 
     std::vector<SEntry> entries;
     std::vector<size_t> tiledEntries;
@@ -812,9 +820,11 @@ void CCanvas::enter() {
 
         if (m_savedStates.contains(entry.id)) {
             auto& saved = m_savedStates[entry.id];
-            saved.restorePos = entry.currentPos;
-            saved.restoreSize = entry.currentSize;
-            saved.wasFloating = entry.wasFloating;
+            if (!resumingSuspended) {
+                saved.restorePos = entry.currentPos;
+                saved.restoreSize = entry.currentSize;
+                saved.wasFloating = entry.wasFloating;
+            }
             saved.pinned = (w->m_pinned || isProtectedApp(w));
         } else {
             SWindowState state;
@@ -864,6 +874,8 @@ void CCanvas::enter() {
 
     logf("[hypr-canvas] entered canvas mode on workspace %ld, saved/restored %zu windows\n",
          (long)m_canvasWorkspace, m_savedStates.size());
+    wsState.resumeOnWorkspaceFocus = false;
+    persistWorkspaceState();
     emitIPCEvent(true);
 }
 
@@ -871,9 +883,11 @@ void CCanvas::exit() {
     // Save current layout to workspace configurations before restoring layout settings
     SWorkspaceCanvasState wsState;
     wsState.savedStates = m_savedStates;
+    wsState.overviewSavedPos = m_overviewSavedPos;
     wsState.zoom = zoom;
     wsState.offset = offset;
     wsState.overviewActive = m_overviewActive;
+    wsState.resumeOnWorkspaceFocus = false;
     m_workspaceStates[m_canvasWorkspace] = wsState;
 
     // Restore all saved window positions and float state
@@ -1251,9 +1265,40 @@ void CCanvas::resetForWorkspaceChange() {
 
     auto mon = Desktop::focusState()->monitor();
     const auto currentWorkspace = mon ? mon->activeWorkspaceID() : WORKSPACE_INVALID;
-    logf("[hypr-canvas] workspace change detected (%ld -> %ld), resetting canvas session\n",
+    logf("[hypr-canvas] workspace change detected (%ld -> %ld), suspending canvas session\n",
          (long)m_canvasWorkspace, (long)currentWorkspace);
-    exit();
+    suspendForWorkspaceChange();
+
+    if (currentWorkspace != WORKSPACE_INVALID) {
+        auto stateIt = m_workspaceStates.find(currentWorkspace);
+        if (stateIt != m_workspaceStates.end() && stateIt->second.resumeOnWorkspaceFocus)
+            enter();
+    }
+}
+
+void CCanvas::suspendForWorkspaceChange() {
+    if (!active || m_canvasWorkspace == WORKSPACE_INVALID)
+        return;
+
+    persistWorkspaceState();
+    auto& wsState = m_workspaceStates[m_canvasWorkspace];
+    wsState.resumeOnWorkspaceFocus = true;
+
+    m_savedStates.clear();
+    active = false;
+    zoom = 1.0;
+    offset = {0, 0};
+    m_canvasWorkspace = WORKSPACE_INVALID;
+    m_panning = false;
+    m_movingWindow = false;
+    m_resizingWindow = false;
+    m_dragWindow = 0;
+    m_pendingStabilize = false;
+    m_pendingRefocus = false;
+    m_overviewActive = false;
+    m_overviewSavedPos.clear();
+
+    emitIPCEvent(true);
 }
 
 void CCanvas::persistWorkspaceState() {
@@ -1262,6 +1307,7 @@ void CCanvas::persistWorkspaceState() {
 
     auto& wsState = m_workspaceStates[m_canvasWorkspace];
     wsState.savedStates = m_savedStates;
+    wsState.overviewSavedPos = m_overviewSavedPos;
     wsState.zoom = zoom;
     wsState.offset = offset;
     wsState.overviewActive = m_overviewActive;
@@ -1279,6 +1325,7 @@ void CCanvas::forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabil
     m_overviewSavedPos.erase(id);
     for (auto& [wsId, wsState] : m_workspaceStates) {
         wsState.savedStates.erase(id);
+        wsState.overviewSavedPos.erase(id);
     }
 
     if (m_dragWindow == id) {
@@ -1438,6 +1485,7 @@ SDispatchResult dispatchOverview(std::string args) {
         }
         g_pCanvas->m_overviewSavedPos.clear();
         g_pCanvas->repositionWindows(ECommitMode::Animate);
+        g_pCanvas->persistWorkspaceState();
         logf("[hypr-canvas] overview OFF: restored original positions\n");
 
     } else {
@@ -1585,6 +1633,7 @@ SDispatchResult dispatchOverview(std::string args) {
 
         g_pCanvas->m_overviewActive = true;
         g_pCanvas->repositionWindows(ECommitMode::Animate);
+        g_pCanvas->persistWorkspaceState();
         logf("[hypr-canvas] overview ON: packed %zu windows (totalW=%.0f totalH=%.0f)\n",
              entries.size(), totalW, totalH);
     }

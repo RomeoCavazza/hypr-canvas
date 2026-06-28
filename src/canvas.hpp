@@ -32,9 +32,11 @@ struct SWindowState {
 
 struct SWorkspaceCanvasState {
     std::map<uint64_t, SWindowState> savedStates;
+    std::map<uint64_t, Vector2D> overviewSavedPos;
     double zoom = 1.0;
     Vector2D offset = {0, 0};
     bool overviewActive = false;
+    bool resumeOnWorkspaceFocus = false;
 };
 
 class CCanvas {
@@ -81,6 +83,7 @@ class CCanvas {
     void repositionWindows(ECommitMode mode);
     bool workspaceChanged() const;
     void resetForWorkspaceChange();
+    void suspendForWorkspaceChange();
     void persistWorkspaceState();
     void forgetWindow(const SP<Desktop::View::CWindow>& window, bool stabilize);
     void requestStabilize(bool refocus);
