@@ -88,9 +88,9 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
 
 // --- Mouse button hook (pan start/stop) ---
 
-typedef void (*onMouseButtonFn)(CInputManager*, IPointer::SButtonEvent);
+typedef void (*onMouseButtonFn)(CInputManager*, IPointer::SButtonEvent, SP<IPointer>);
 
-static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e) {
+static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e, SP<IPointer> pointer) {
     if (g_pCanvas && g_pCanvas->workspaceChanged())
         g_pCanvas->resetForWorkspaceChange();
 
@@ -112,7 +112,7 @@ static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e) {
 
             if (!g_pCanvas->active) {
                 auto original = (onMouseButtonFn)g_pCanvas->m_mouseButtonHook->m_original;
-                original(self, e);
+                original(self, e, pointer);
                 return;
             }
 
@@ -172,7 +172,7 @@ static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e) {
     }
 
     auto original = (onMouseButtonFn)g_pCanvas->m_mouseButtonHook->m_original;
-    original(self, e);
+    original(self, e, pointer);
 }
 
 // --- Mouse move hook (pan drag) ---
