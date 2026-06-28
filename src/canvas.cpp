@@ -85,8 +85,6 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
             if (!g_pCanvas->active)
                 g_pCanvas->enter();
 
-            g_pCanvas->m_overviewActive = false;
-
             const double zoomFactor = std::pow(CCanvas::ZOOM_STEP, std::abs(scrollDelta));
             double       newZoom    = g_pCanvas->zoom;
             if (scrollDelta < 0)
@@ -395,8 +393,6 @@ SDispatchResult dispatchPan(std::string args) {
     if (!g_pCanvas->active)
         g_pCanvas->enter();
 
-    g_pCanvas->m_overviewActive = false;
-
     g_pCanvas->offset.x += delta.x / g_pCanvas->zoom;
     g_pCanvas->offset.y += delta.y / g_pCanvas->zoom;
     g_pCanvas->repositionWindows(ECommitMode::Warp);
@@ -431,8 +427,6 @@ SDispatchResult dispatchZoom(std::string args) {
 
     if (!g_pCanvas->active)
         g_pCanvas->enter();
-
-    g_pCanvas->m_overviewActive = false;
 
     g_pCanvas->applyZoom(newZoom, center);
     g_pCanvas->repositionWindows(ECommitMode::Warp);
@@ -568,7 +562,6 @@ CCanvas::CCanvas() {
 
     m_swipeBeginListener = Event::bus()->m_events.gesture.swipe.begin.listen([this](IPointer::SSwipeBeginEvent e, Event::SCallbackInfo& info) {
         if (!active) return;
-        m_overviewActive = false;
         m_panning = true;
         info.cancelled = true;
     });
@@ -591,7 +584,6 @@ CCanvas::CCanvas() {
 
     m_pinchBeginListener = Event::bus()->m_events.gesture.pinch.begin.listen([this](IPointer::SPinchBeginEvent e, Event::SCallbackInfo& info) {
         if (!active) return;
-        m_overviewActive = false;
         m_pinchStartZoom = zoom;
         info.cancelled = true;
     });
@@ -780,6 +772,7 @@ void CCanvas::exit() {
     m_resizingWindow = false;
     m_dragWindow = 0;
     m_overviewActive = false;
+    m_overviewSavedPos.clear();
 
     // Force relayout to snap windows back to tiling
     auto mon = Desktop::focusState()->monitor();
@@ -1167,63 +1160,93 @@ SDispatchResult dispatchOverview(std::string args) {
     g_pCanvas->ensureActive();
 
     if (g_pCanvas->m_overviewActive) {
+        // --- Toggle OFF: restore original canvas positions ---
         g_pCanvas->m_overviewActive = false;
 
-        auto activeW = g_pCanvas->activeCanvasWindow();
-        if (activeW) {
-            g_pCanvas->zoom = g_pCanvas->m_preOverviewZoom;
-            g_pCanvas->centerOnWindow(activeW, ECommitMode::Animate);
-            g_pCanvas->focusWindow(activeW);
-            logf("[hypr-canvas] overview toggle off: centering on active window\n");
-        } else {
-            g_pCanvas->zoom = g_pCanvas->m_preOverviewZoom;
-            g_pCanvas->offset = g_pCanvas->m_preOverviewOffset;
-            g_pCanvas->repositionWindows(ECommitMode::Animate);
-            logf("[hypr-canvas] overview toggle off: restoring offset\n");
+        for (auto& [id, state] : g_pCanvas->m_savedStates) {
+            auto it = g_pCanvas->m_overviewSavedPos.find(id);
+            if (it != g_pCanvas->m_overviewSavedPos.end())
+                state.canvasPos = it->second;
         }
-    } else {
-        double minX = std::numeric_limits<double>::infinity();
-        double minY = std::numeric_limits<double>::infinity();
-        double maxX = -std::numeric_limits<double>::infinity();
-        double maxY = -std::numeric_limits<double>::infinity();
+        g_pCanvas->m_overviewSavedPos.clear();
+        g_pCanvas->repositionWindows(ECommitMode::Animate);
+        logf("[hypr-canvas] overview OFF: restored original positions\n");
 
-        size_t count = 0;
+    } else {
+        // --- Toggle ON: pack all non-pinned windows into a tight cluster ---
+
+        // Collect non-pinned windows, save current positions
+        struct WEntry {
+            uint64_t   id;
+            Vector2D   size;
+            Vector2D   origPos;
+        };
+        std::vector<WEntry> entries;
+
+        g_pCanvas->m_overviewSavedPos.clear();
         for (auto& [id, state] : g_pCanvas->m_savedStates) {
             if (state.pinned) continue;
-            minX = std::min(minX, state.canvasPos.x);
-            minY = std::min(minY, state.canvasPos.y);
-            maxX = std::max(maxX, state.canvasPos.x + state.canvasSize.x);
-            maxY = std::max(maxY, state.canvasPos.y + state.canvasSize.y);
-            count++;
+            g_pCanvas->m_overviewSavedPos[id] = state.canvasPos;
+            entries.push_back({ id, state.canvasSize, state.canvasPos });
         }
 
-        if (count == 0) {
-            logf("[hypr-canvas] overview: no windows to fit\n");
+        if (entries.empty()) {
+            logf("[hypr-canvas] overview: no windows to pack\n");
             return {};
         }
 
-        g_pCanvas->m_preOverviewZoom = g_pCanvas->zoom;
-        g_pCanvas->m_preOverviewOffset = g_pCanvas->offset;
-        g_pCanvas->m_overviewActive = true;
+        // Sort left-to-right by original X for stable, intuitive order
+        std::sort(entries.begin(), entries.end(), [](const WEntry& a, const WEntry& b) {
+            return a.origPos.x < b.origPos.x;
+        });
 
+        // Tight gap between windows
+        constexpr double GAP = 18.0;
+
+        // Max row width ≈ viewport width in canvas space (no zoom change)
         auto mon = Desktop::focusState()->monitor();
-        if (!mon) return {};
+        const double maxRowWidth = mon
+            ? (mon->m_transformedSize.x / g_pCanvas->zoom) * 0.92
+            : 2400.0;
 
-        const auto monSize = mon->m_transformedSize;
-        const double w = maxX - minX;
-        const double h = maxY - minY;
+        // Flow layout: place windows row by row
+        struct Placement { uint64_t id; Vector2D pos; };
+        std::vector<Placement> placements;
+        double curX = 0.0, curY = 0.0, rowH = 0.0;
+        double totalW = 0.0, totalH = 0.0;
 
-        double targetZoomX = monSize.x * 0.9 / std::max(w, 1.0);
-        double targetZoomY = monSize.y * 0.9 / std::max(h, 1.0);
-        double targetZoom = std::min(targetZoomX, targetZoomY);
+        for (auto& e : entries) {
+            // Wrap to next row if window doesn't fit
+            if (curX > 0 && curX + e.size.x > maxRowWidth) {
+                curX  = 0.0;
+                curY += rowH + GAP;
+                rowH  = 0.0;
+            }
+            placements.push_back({ e.id, { curX, curY } });
+            curX   += e.size.x + GAP;
+            rowH    = std::max(rowH, e.size.y);
+            totalW  = std::max(totalW, curX - GAP);
+            totalH  = curY + rowH;
+        }
 
-        g_pCanvas->zoom = std::clamp(targetZoom, CCanvas::ZOOM_MIN, CCanvas::ZOOM_MAX);
+        // Center the cluster around the current viewport center in canvas space
+        const Vector2D viewportCenter = g_pCanvas->screenToCanvas(g_pCanvas->monitorCenter());
+        const Vector2D clusterOrigin  = {
+            viewportCenter.x - totalW / 2.0,
+            viewportCenter.y - totalH / 2.0
+        };
 
-        Vector2D centerBox = { minX + w / 2.0, minY + h / 2.0 };
-        g_pCanvas->offset = centerBox - g_pCanvas->monitorCenter() / g_pCanvas->zoom;
+        // Assign new positions
+        for (auto& p : placements) {
+            auto it = g_pCanvas->m_savedStates.find(p.id);
+            if (it != g_pCanvas->m_savedStates.end())
+                it->second.canvasPos = clusterOrigin + p.pos;
+        }
 
+        g_pCanvas->m_overviewActive = true;
         g_pCanvas->repositionWindows(ECommitMode::Animate);
-        logf("[hypr-canvas] overview toggle on: count=%zu zoom=%.3f\n", count, g_pCanvas->zoom);
+        logf("[hypr-canvas] overview ON: packed %zu windows (totalW=%.0f totalH=%.0f)\n",
+             entries.size(), totalW, totalH);
     }
 
     scheduleFrame();

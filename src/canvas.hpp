@@ -96,8 +96,7 @@ class CCanvas {
 
     // Overview & gesture state
     bool m_overviewActive = false;
-    double m_preOverviewZoom = 1.0;
-    Vector2D m_preOverviewOffset = {0, 0};
+    std::map<uint64_t, Vector2D> m_overviewSavedPos; // canvasPos before cluster rearrange
     double m_pinchStartZoom = 1.0;
 
     // Hooks — only mouse input hooks needed (no render hooks!)
