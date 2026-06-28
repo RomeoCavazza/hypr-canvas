@@ -21,7 +21,7 @@
     in rec {
       hypr-canvas = pkgs.stdenv.mkDerivation {
         pname = "hypr-canvas";
-        version = "0.4.10-v055";
+        version = "0.4.11-v055";
         src = nix-filter.lib {
           root = ./.;
           include = [
