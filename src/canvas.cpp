@@ -900,8 +900,14 @@ void CCanvas::exit() {
 
         uint64_t id = (uint64_t)w.get();
         auto it = m_savedStates.find(id);
-        if (it == m_savedStates.end())
+        if (it == m_savedStates.end()) {
+            if (!w->m_pinned && !isProtectedApp(w) && w->m_isFloating) {
+                g_pHyprRenderer->damageWindow(w);
+                setWindowFloating(w, false);
+                g_pHyprRenderer->damageWindow(w);
+            }
             continue;
+        }
 
         const auto& saved = it->second;
         if (saved.pinned || w->m_pinned || isProtectedApp(w))
@@ -1487,12 +1493,13 @@ void CCanvas::onWindowOpen(const SP<Desktop::View::CWindow>& w) {
     logf("[hypr-canvas] new window opened while canvas active: id=%lx class=%s title=%s\n",
          id, w->m_class.c_str(), w->m_title.c_str());
 
+    const bool originallyFloating = w->m_isFloating;
     setWindowFloating(w, true);
 
     SWindowState state;
     state.restorePos = w->m_realPosition->value();
     state.restoreSize = w->m_realSize->value();
-    state.wasFloating = true;
+    state.wasFloating = originallyFloating;
     state.pinned = false;
 
     Vector2D initialSize = w->m_realSize->value();
