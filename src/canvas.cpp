@@ -39,10 +39,7 @@ static void scheduleFrame() {
     }
 }
 
-// --- Forward typedefs ---
 using PHLWINDOW = SP<Desktop::View::CWindow>;
-
-// --- Scroll/zoom hook ---
 
 typedef void (*onMouseWheelFn)(CInputManager*, IPointer::SAxisEvent, SP<IPointer>);
 typedef Vector2D (*positionFn)(CPointerManager*);
@@ -107,7 +104,6 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
             else
                 newZoom /= zoomFactor;
 
-            // Cursor-anchored zoom for natural canvas navigation
             auto mon = Desktop::focusState()->monitor();
             if (!mon)
                 return;
@@ -128,7 +124,7 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
     original(self, e, pointer);
 }
 
-// --- Mouse button hook (pan start/stop) ---
+// --- Mouse Hooks ---
 
 typedef void (*onMouseButtonFn)(CInputManager*, IPointer::SButtonEvent, SP<IPointer>);
 
@@ -219,8 +215,6 @@ static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e, SP<IP
     original(self, e, pointer);
 }
 
-// --- Mouse move hook (pan drag) ---
-
 typedef void (*onMouseMovedFn)(CInputManager*, IPointer::SMotionEvent);
 
 static void hkOnMouseMoved(CInputManager* self, IPointer::SMotionEvent e) {
@@ -240,7 +234,6 @@ static void hkOnMouseMoved(CInputManager* self, IPointer::SMotionEvent e) {
     }
 
     if (g_pCanvas && g_pCanvas->m_panning) {
-        // Pan: move viewport by mouse delta
         g_pCanvas->offset.x -= e.delta.x / g_pCanvas->zoom;
         g_pCanvas->offset.y -= e.delta.y / g_pCanvas->zoom;
         g_pCanvas->repositionWindows(ECommitMode::Warp);
@@ -358,11 +351,7 @@ SDispatchResult dispatchHome(std::string args) {
 
 
 
-// --- canvas:nav -----------------------------------------------------------
-// Context-aware arrows:
-//   canvas inactive → delegate to Hyprland movefocus (tiled navigation)
-//   canvas active   → navigate window focus (directional focus + centering)
-// -------------------------------------------------------------------------
+// --- Navigation ---
 SDispatchResult dispatchNav(std::string args) {
     if (!g_pCanvas)
         return {};
@@ -370,7 +359,6 @@ SDispatchResult dispatchNav(std::string args) {
     if (g_pCanvas->workspaceChanged())
         g_pCanvas->resetForWorkspaceChange();
 
-    // Map arg → movefocus direction
     std::string mfDir;
     if      (args == "left")  mfDir = "l";
     else if (args == "right") mfDir = "r";
@@ -379,24 +367,18 @@ SDispatchResult dispatchNav(std::string args) {
     else return {};
 
     if (!g_pCanvas->active) {
-        // Tiled mode: forward to native movefocus
         auto it = g_pKeybindManager->m_dispatchers.find("movefocus");
         if (it != g_pKeybindManager->m_dispatchers.end())
             it->second(mfDir);
         return {};
     }
 
-    // Canvas mode: navigate window focus in the specified direction
     g_pCanvas->nav(args);
     scheduleFrame();
     return {};
 }
 
-// --- canvas:swap ----------------------------------------------------------
-// Context-aware window swap:
-//   canvas inactive → delegate to Hyprland swapwindow
-//   canvas active   → swap canvas position and size with directional target
-// -------------------------------------------------------------------------
+// --- Swap ---
 SDispatchResult dispatchSwap(std::string args) {
     if (!g_pCanvas)
         return {};
@@ -423,10 +405,7 @@ SDispatchResult dispatchSwap(std::string args) {
     return {};
 }
 
-// --- canvas:pan ------------------------------------------------------------
-// Explicit camera pan — only operates when canvas is already active.
-// Does NOT auto-enter canvas (use canvas:toggle for that).
-// -------------------------------------------------------------------------
+// --- Pan ---
 SDispatchResult dispatchPan(std::string args) {
     if (!g_pCanvas)
         return {};
@@ -434,7 +413,6 @@ SDispatchResult dispatchPan(std::string args) {
     if (g_pCanvas->workspaceChanged())
         g_pCanvas->resetForWorkspaceChange();
 
-    // Guard: don't pull windows into canvas mode on an accidental nudge
     if (!g_pCanvas->active)
         return {};
 
@@ -540,7 +518,7 @@ SDispatchResult dispatchToggle(std::string args) {
     return {};
 }
 
-// --- Hook helper ---
+// --- Hook Helpers ---
 
 static CFunctionHook* hookByName(const std::string& name, void* dest) {
     auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, name);
@@ -558,7 +536,6 @@ bool CCanvas::isProtectedApp(const SP<Desktop::View::CWindow>& window) const {
     std::string classname = window->m_class;
     std::string title = window->m_title;
 
-    // Helper lambda for case-insensitive substring search
     auto contains = [](const std::string& str, const std::string& sub) {
         auto it = std::search(
             str.begin(), str.end(),
@@ -570,7 +547,6 @@ bool CCanvas::isProtectedApp(const SP<Desktop::View::CWindow>& window) const {
         return it != str.end();
     };
 
-    // Auto-exclude overlays, launchers, lockscreens, sharing pickers, panels, screenshot tools, and portal popups
     if (contains(classname, "rofi") ||
         contains(classname, "slurp") ||
         contains(classname, "grim") ||
@@ -623,7 +599,7 @@ void CCanvas::emitIPCEvent(bool force) {
     g_pEventManager->postEvent({ "canvas", payload });
 }
 
-// --- Constructor / Destructor ---
+// --- Lifecycle ---
 
 CCanvas::CCanvas() {
     m_mouseWheelHook  = hookByName("onMouseWheel", (void*)&hkOnMouseWheel);
@@ -740,7 +716,7 @@ CCanvas::~CCanvas() {
         HyprlandAPI::removeFunctionHook(PHANDLE, m_surfaceHitHook);
 }
 
-// --- Canvas mode enter/exit ---
+// --- Canvas Mode ---
 
 void CCanvas::enter() {
     auto mon = Desktop::focusState()->monitor();
@@ -763,7 +739,6 @@ void CCanvas::enter() {
     m_resizingWindow = false;
     m_dragWindow = 0;
 
-    // Fetch or initialize workspace state (shape memory)
     auto& wsState = m_workspaceStates[m_canvasWorkspace];
     const bool resumingSuspended = wsState.resumeOnWorkspaceFocus;
     zoom = wsState.zoom;
@@ -793,7 +768,6 @@ void CCanvas::enter() {
         entries.push_back(entry);
     }
 
-    // Remove any windows from wsState.savedStates that are no longer on the workspace
     for (auto it = wsState.savedStates.begin(); it != wsState.savedStates.end(); ) {
         uint64_t id = it->first;
         bool found = false;
@@ -810,7 +784,6 @@ void CCanvas::enter() {
         }
     }
 
-    // Now populate m_savedStates from wsState.savedStates
     m_savedStates = wsState.savedStates;
 
     std::sort(tiledEntries.begin(), tiledEntries.end(), [&](size_t a, size_t b) {
@@ -895,7 +868,6 @@ void CCanvas::enter() {
 }
 
 void CCanvas::exit() {
-    // Save current layout to workspace configurations before restoring layout settings
     SWorkspaceCanvasState wsState;
     wsState.savedStates = m_savedStates;
     wsState.overviewSavedPos = m_overviewSavedPos;
@@ -907,7 +879,6 @@ void CCanvas::exit() {
 
     active = false;
 
-    // Restore all saved window positions and float state
     for (auto& w : g_pCompositor->m_windows) {
         if (!w || w->isHidden() || !w->m_isMapped || !windowOnCanvasWorkspace(w))
             continue;
@@ -1350,7 +1321,7 @@ Vector2D CCanvas::visualPointToLogicalPoint(const SP<Desktop::View::CWindow>& wi
     };
 }
 
-// --- Reposition all windows based on zoom+offset ---
+// --- Reposition ---
 
 void CCanvas::repositionWindows(ECommitMode mode) {
     for (auto& w : g_pCompositor->m_windows) {
@@ -1547,11 +1518,9 @@ bool CCanvas::windowOnCanvasWorkspace(const SP<Desktop::View::CWindow>& window) 
     return window->workspaceID() == m_canvasWorkspace;
 }
 
-// --- Zoom with cursor anchoring ---
+// --- Zoom ---
 
 void CCanvas::applyZoom(double newZoom, const Vector2D& anchorScreen) {
-    // anchorScreen = point under cursor in screen coords
-    // Find what canvas point is under cursor: canvasPoint = offset + anchorScreen / zoom
     const Vector2D anchorCanvas = {
         offset.x + anchorScreen.x / zoom,
         offset.y + anchorScreen.y / zoom
@@ -1559,9 +1528,6 @@ void CCanvas::applyZoom(double newZoom, const Vector2D& anchorScreen) {
 
     zoom = std::clamp(newZoom, ZOOM_MIN, ZOOM_MAX);
 
-    // Adjust offset so anchorCanvas stays under cursor:
-    // anchorScreen = (anchorCanvas - offset) * zoom
-    // offset = anchorCanvas - anchorScreen / zoom
     offset = {
         anchorCanvas.x - anchorScreen.x / zoom,
         anchorCanvas.y - anchorScreen.y / zoom
@@ -1628,7 +1594,6 @@ SDispatchResult dispatchOverview(std::string args) {
     g_pCanvas->ensureActive();
 
     if (g_pCanvas->m_overviewActive) {
-        // --- Toggle OFF: restore original canvas positions ---
         g_pCanvas->m_overviewActive = false;
 
         for (auto& [id, state] : g_pCanvas->m_savedStates) {
@@ -1642,9 +1607,6 @@ SDispatchResult dispatchOverview(std::string args) {
         logf("[hypr-canvas] overview OFF: restored original positions\n");
 
     } else {
-        // --- Toggle ON: pack all non-pinned windows into a tight cluster ---
-
-        // Collect non-pinned windows, save current positions
         struct WEntry {
             uint64_t   id;
             Vector2D   size;
@@ -1664,12 +1626,10 @@ SDispatchResult dispatchOverview(std::string args) {
             return {};
         }
 
-        // Sort windows by area descending (largest first) to put the largest in the center
         std::sort(entries.begin(), entries.end(), [](const WEntry& a, const WEntry& b) {
             return (a.size.x * a.size.y) > (b.size.x * b.size.y);
         });
 
-        // Tight gap between windows
         constexpr double GAP = 18.0;
 
         struct Placed {
@@ -1679,10 +1639,8 @@ SDispatchResult dispatchOverview(std::string args) {
         };
         std::vector<Placed> placed;
 
-        // Helper to check overlap
         auto overlaps = [&](const Vector2D& pos, const Vector2D& size) {
             for (const auto& p : placed) {
-                // Check intersection with small epsilon to avoid float inaccuracies
                 bool intersects = !(pos.x + size.x + GAP - 0.1 <= p.pos.x ||
                                     p.pos.x + p.size.x + GAP - 0.1 <= pos.x ||
                                     pos.y + size.y + GAP - 0.1 <= p.pos.y ||
@@ -1692,7 +1650,6 @@ SDispatchResult dispatchOverview(std::string args) {
             return false;
         };
 
-        // Center of the first (largest) window as the target center
         Vector2D targetCenter = {0, 0};
 
         double minX = 999999.0, maxX = -999999.0;
@@ -1701,7 +1658,6 @@ SDispatchResult dispatchOverview(std::string args) {
         for (size_t i = 0; i < entries.size(); ++i) {
             auto& e = entries[i];
             if (i == 0) {
-                // Place the largest window at (0,0)
                 placed.push_back({ e.id, {0, 0}, e.size });
                 targetCenter = e.size / 2.0;
                 minX = 0;
@@ -1711,12 +1667,10 @@ SDispatchResult dispatchOverview(std::string args) {
                 continue;
             }
 
-            // Find best candidate position
             Vector2D bestPos = {0, 0};
             double bestDist = std::numeric_limits<double>::max();
             bool found = false;
 
-            // Helper to evaluate a candidate position
             auto evalCandidate = [&](const Vector2D& cand) {
                 if (overlaps(cand, e.size)) return;
                 Vector2D candCenter = cand + e.size / 2.0;
@@ -1729,25 +1683,21 @@ SDispatchResult dispatchOverview(std::string args) {
             };
 
             for (const auto& p : placed) {
-                // 1. Right of p
                 double rx = p.pos.x + p.size.x + GAP;
                 evalCandidate({ rx, p.pos.y }); // Align top
                 evalCandidate({ rx, p.pos.y + (p.size.y - e.size.y) / 2.0 }); // Align center
                 evalCandidate({ rx, p.pos.y + p.size.y - e.size.y }); // Align bottom
 
-                // 2. Left of p
                 double lx = p.pos.x - (e.size.x + GAP);
                 evalCandidate({ lx, p.pos.y }); // Align top
                 evalCandidate({ lx, p.pos.y + (p.size.y - e.size.y) / 2.0 }); // Align center
                 evalCandidate({ lx, p.pos.y + p.size.y - e.size.y }); // Align bottom
 
-                // 3. Bottom of p
                 double by = p.pos.y + p.size.y + GAP;
                 evalCandidate({ p.pos.x, by }); // Align left
                 evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, by }); // Align center
                 evalCandidate({ p.pos.x + p.size.x - e.size.x, by }); // Align right
 
-                // 4. Top of p
                 double ty = p.pos.y - (e.size.y + GAP);
                 evalCandidate({ p.pos.x, ty }); // Align left
                 evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, ty }); // Align center
@@ -1755,7 +1705,6 @@ SDispatchResult dispatchOverview(std::string args) {
             }
 
             if (!found) {
-                // Fallback: place it somewhere safe (e.g. far right)
                 bestPos = { (placed.back().pos.x + placed.back().size.x + GAP), 0.0 };
             }
 
@@ -1770,14 +1719,12 @@ SDispatchResult dispatchOverview(std::string args) {
         double totalW = maxX - minX;
         double totalH = maxY - minY;
 
-        // Center the cluster around the current viewport center in canvas space
         const Vector2D viewportCenter = g_pCanvas->screenToCanvas(g_pCanvas->monitorCenter());
         const Vector2D clusterOrigin  = {
             viewportCenter.x - (minX + maxX) / 2.0,
             viewportCenter.y - (minY + maxY) / 2.0
         };
 
-        // Assign new positions
         for (auto& p : placed) {
             auto it = g_pCanvas->m_savedStates.find(p.id);
             if (it != g_pCanvas->m_savedStates.end())

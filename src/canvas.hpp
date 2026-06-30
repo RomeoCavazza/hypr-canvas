@@ -21,7 +21,6 @@ enum class ECommitMode {
     Animate,
 };
 
-// Saved window state for canvas mode
 struct SWindowState {
     Vector2D restorePos;
     Vector2D restoreSize;
@@ -45,33 +44,26 @@ class CCanvas {
     CCanvas();
     ~CCanvas();
 
-    // Canvas state
     double   zoom   = 1.0;
-    Vector2D offset = {0, 0};   // canvas-space offset of viewport origin
-    bool     active = false;     // canvas mode on/off
+    Vector2D offset = {0, 0};
+    bool     active = false;
     WORKSPACEID m_canvasWorkspace = WORKSPACE_INVALID;
 
-    // Saved window states (keyed by window address)
     std::map<uint64_t, SWindowState> m_savedStates;
 
-    // Workspace-specific canvas configurations (for shape memory)
     std::map<WORKSPACEID, SWorkspaceCanvasState> m_workspaceStates;
 
-    // Enter/exit canvas mode
     void enter();
     void exit();
     void ensureActive();
 
-    // Coordinate transforms
     Vector2D screenToCanvas(const Vector2D& screen) const;
     Vector2D canvasToScreen(const Vector2D& canvas) const;
     Vector2D canvasSizeToScreen(const Vector2D& canvasSize) const;
     Vector2D monitorCenter() const;
 
-    // Apply zoom (cursor-anchored)
     void applyZoom(double newZoom, const Vector2D& anchorScreen);
 
-    // Pan by delta in screen pixels
     void pan(const Vector2D& delta);
 
 
@@ -81,7 +73,6 @@ class CCanvas {
     void swap(const std::string& direction);
     void togglePin();
 
-    // Reposition all windows based on current zoom+offset
     void repositionWindows(ECommitMode mode);
     bool workspaceChanged() const;
     void resetForWorkspaceChange();
@@ -111,7 +102,6 @@ class CCanvas {
     Vector2D visualPointToLogicalPoint(const SP<Desktop::View::CWindow>& window, const SWindowState& state, const Vector2D& point) const;
     SP<Desktop::View::CWindow> windowAtVisualPoint(const Vector2D& point) const;
 
-    // Constants
     static constexpr double ZOOM_MIN  = 0.1;
     static constexpr double ZOOM_MAX  = 2.0;
     static constexpr double ZOOM_STEP = 1.06;
@@ -122,33 +112,28 @@ class CCanvas {
     static constexpr double MIN_WINDOW_W = 160.0;
     static constexpr double MIN_WINDOW_H = 120.0;
 
-    // Panning state
     bool m_panning = false;
     bool m_movingWindow = false;
     bool m_resizingWindow = false;
     uint64_t m_dragWindow = 0;
 
-    // Overview & gesture state
     bool m_overviewActive = false;
-    std::map<uint64_t, Vector2D> m_overviewSavedPos; // canvasPos before cluster rearrange
+    std::map<uint64_t, Vector2D> m_overviewSavedPos;
     double m_pinchStartZoom = 1.0;
     bool m_pendingStabilize = false;
     bool m_pendingRefocus = false;
     int  m_pendingReassertFrames = 0;
 
-    // Hooks — mouse input and hit-test hooks
     CFunctionHook* m_mouseWheelHook  = nullptr;
     CFunctionHook* m_mouseButtonHook = nullptr;
     CFunctionHook* m_mouseMovedHook  = nullptr;
     CFunctionHook* m_windowHitHook   = nullptr;
     CFunctionHook* m_surfaceHitHook  = nullptr;
 
-    // IPC & Protected apps
     void emitIPCEvent(bool force = false);
     bool isProtectedApp(const SP<Desktop::View::CWindow>& window) const;
     void onWindowOpen(const SP<Desktop::View::CWindow>& window);
 
-    // Cooldown & Signal listeners
     std::chrono::steady_clock::time_point m_lastNavTime;
     CHyprSignalListener m_destroyWindowListener;
     CHyprSignalListener m_closeWindowListener;
