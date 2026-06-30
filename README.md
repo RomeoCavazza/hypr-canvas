@@ -1,9 +1,11 @@
 # hyprcanvas
 
-[![CI](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/ci.yml/badge.svg)](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/ci.yml)
-[![Build](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/build.yml/badge.svg)](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/build.yml)
-[![Release](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/release.yml/badge.svg)](https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/release.yml)
-[![Hyprland](https://img.shields.io/badge/Hyprland-v0.55.4-58E1FF)](https://github.com/hyprwm/Hyprland/releases/tag/v0.55.4)
+<p align="left">
+  <a href="https://github.com/hyprwm/Hyprland/releases/tag/v0.55.4"><img src="https://img.shields.io/badge/Hyprland-v0.55.4-58E1FF" alt="Hyprland" /></a>
+  <a href="https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/ci.yml"><img src="https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/build.yml"><img src="https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/build.yml/badge.svg" alt="Build" /></a>
+  <a href="https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/release.yml"><img src="https://github.com/RomeoCavazza/hypr-canvas/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
+</p>
 
 Native C++ infinite canvas mode for Hyprland.
 
