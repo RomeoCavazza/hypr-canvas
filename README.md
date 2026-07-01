@@ -9,7 +9,7 @@
 
 Native C++ infinite canvas mode for Hyprland.
 
-<img src="./assets/showcase.webp" width="100%" alt="hyprcanvas showcase" />
+<img src="https://raw.githubusercontent.com/RomeoCavazza/assets/main/hypr-canvas/assets/showcase.webp" width="100%" alt="hyprcanvas showcase" />
 
 hyprcanvas turns one Hyprland workspace into a spatial plane: windows become persistent cards in virtual canvas coordinates, and the monitor becomes a camera controlled by `offset + zoom`.
 
@@ -37,7 +37,7 @@ canvas:overview
 
 ### Closer Look
 
-<img src="./assets/demo.webp" width="100%" alt="hyprcanvas demo" />
+<img src="https://raw.githubusercontent.com/RomeoCavazza/assets/main/hypr-canvas/assets/demo.webp" width="100%" alt="hyprcanvas demo" />
 
 ## Configuration
 
