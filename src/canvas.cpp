@@ -124,8 +124,6 @@ static void hkOnMouseWheel(CInputManager* self, IPointer::SAxisEvent e, SP<IPoin
     original(self, e, pointer);
 }
 
-// --- Mouse Hooks ---
-
 typedef void (*onMouseButtonFn)(CInputManager*, IPointer::SButtonEvent, SP<IPointer>);
 
 static void hkOnMouseButton(CInputManager* self, IPointer::SButtonEvent e, SP<IPointer> pointer) {
@@ -223,7 +221,6 @@ static void hkOnMouseMoved(CInputManager* self, IPointer::SMotionEvent e) {
     if (g_pCanvas && g_pCanvas->workspaceChanged())
         g_pCanvas->resetForWorkspaceChange();
 
-    // If we ever miss a button-release event, do not stay stuck in a drag mode.
     if (g_pCanvas && !(mods & HL_MODIFIER_META) &&
         (g_pCanvas->m_panning || g_pCanvas->m_movingWindow || g_pCanvas->m_resizingWindow)) {
         logf("[hypr-canvas] drag watchdog reset (mods released)\n");
@@ -267,8 +264,6 @@ static void hkOnMouseMoved(CInputManager* self, IPointer::SMotionEvent e) {
     original(self, e);
 }
 
-// --- Dispatchers ---
-
 SDispatchResult dispatchEnter(std::string args) {
     if (!g_pCanvas)
         return {};
@@ -307,8 +302,6 @@ SDispatchResult dispatchReset(std::string args) {
     }
     return {};
 }
-
-
 
 SDispatchResult dispatchCenter(std::string args) {
     if (!g_pCanvas)
@@ -349,9 +342,6 @@ SDispatchResult dispatchHome(std::string args) {
     return {};
 }
 
-
-
-// --- Navigation ---
 SDispatchResult dispatchNav(std::string args) {
     if (!g_pCanvas)
         return {};
@@ -378,7 +368,6 @@ SDispatchResult dispatchNav(std::string args) {
     return {};
 }
 
-// --- Swap ---
 SDispatchResult dispatchSwap(std::string args) {
     if (!g_pCanvas)
         return {};
@@ -405,7 +394,6 @@ SDispatchResult dispatchSwap(std::string args) {
     return {};
 }
 
-// --- Pan ---
 SDispatchResult dispatchPan(std::string args) {
     if (!g_pCanvas)
         return {};
@@ -518,8 +506,6 @@ SDispatchResult dispatchToggle(std::string args) {
     return {};
 }
 
-// --- Hook Helpers ---
-
 static CFunctionHook* hookByName(const std::string& name, void* dest) {
     auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, name);
     logf("[hypr-canvas] %s: %zu matches\n", name.c_str(), fns.size());
@@ -598,8 +584,6 @@ void CCanvas::emitIPCEvent(bool force) {
     lastPayload = payload;
     g_pEventManager->postEvent({ "canvas", payload });
 }
-
-// --- Lifecycle ---
 
 CCanvas::CCanvas() {
     m_mouseWheelHook  = hookByName("onMouseWheel", (void*)&hkOnMouseWheel);
@@ -715,8 +699,6 @@ CCanvas::~CCanvas() {
     if (m_surfaceHitHook)
         HyprlandAPI::removeFunctionHook(PHANDLE, m_surfaceHitHook);
 }
-
-// --- Canvas Mode ---
 
 void CCanvas::enter() {
     auto mon = Desktop::focusState()->monitor();
@@ -918,7 +900,6 @@ void CCanvas::exit() {
     m_overviewActive = false;
     m_overviewSavedPos.clear();
 
-    // Force relayout to snap windows back to tiling
     auto mon = Desktop::focusState()->monitor();
     if (mon)
         g_layoutManager->recalculateMonitor(mon);
@@ -952,9 +933,6 @@ Vector2D CCanvas::monitorCenter() const {
 
     return mon->m_position + mon->m_size / 2.0;
 }
-
-
-
 
 void CCanvas::centerActive(ECommitMode mode) {
     centerOnWindow(activeCanvasWindow(), mode);
@@ -1017,7 +995,6 @@ void CCanvas::swap(const std::string& direction) {
     if (sourceIt->second.pinned || targetIt->second.pinned)
         return;
 
-    // Like drag from overview: an explicit edit accepts the packed shape.
     if (m_overviewActive) {
         m_overviewActive = false;
         m_overviewSavedPos.clear();
@@ -1205,7 +1182,6 @@ void CCanvas::setWindowFloating(const SP<Desktop::View::CWindow>& window, bool f
         g_layoutManager->changeFloatingMode(target);
     }
 
-    // Fallback for transient windows whose layout target is not attached yet.
     if (window->m_isFloating != floating)
         window->m_isFloating = floating;
 }
@@ -1321,8 +1297,6 @@ Vector2D CCanvas::visualPointToLogicalPoint(const SP<Desktop::View::CWindow>& wi
     };
 }
 
-// --- Reposition ---
-
 void CCanvas::repositionWindows(ECommitMode mode) {
     for (auto& w : g_pCompositor->m_windows) {
         if (!w || w->isHidden() || !w->m_isMapped || !windowOnCanvasWorkspace(w))
@@ -1337,8 +1311,6 @@ void CCanvas::repositionWindows(ECommitMode mode) {
         if (saved.pinned || w->m_pinned || isProtectedApp(w))
             continue;
 
-        // Move/scale the compositor box, but do not resize the client while
-        // panning or zooming the camera.
         commitWindow(w, visualWindowPos(w, saved), visualWindowSize(w, saved), mode, false);
     }
     emitIPCEvent();
@@ -1518,8 +1490,6 @@ bool CCanvas::windowOnCanvasWorkspace(const SP<Desktop::View::CWindow>& window) 
     return window->workspaceID() == m_canvasWorkspace;
 }
 
-// --- Zoom ---
-
 void CCanvas::applyZoom(double newZoom, const Vector2D& anchorScreen) {
     const Vector2D anchorCanvas = {
         offset.x + anchorScreen.x / zoom,
@@ -1684,24 +1654,24 @@ SDispatchResult dispatchOverview(std::string args) {
 
             for (const auto& p : placed) {
                 double rx = p.pos.x + p.size.x + GAP;
-                evalCandidate({ rx, p.pos.y }); // Align top
-                evalCandidate({ rx, p.pos.y + (p.size.y - e.size.y) / 2.0 }); // Align center
-                evalCandidate({ rx, p.pos.y + p.size.y - e.size.y }); // Align bottom
+                evalCandidate({ rx, p.pos.y });
+                evalCandidate({ rx, p.pos.y + (p.size.y - e.size.y) / 2.0 });
+                evalCandidate({ rx, p.pos.y + p.size.y - e.size.y });
 
                 double lx = p.pos.x - (e.size.x + GAP);
-                evalCandidate({ lx, p.pos.y }); // Align top
-                evalCandidate({ lx, p.pos.y + (p.size.y - e.size.y) / 2.0 }); // Align center
-                evalCandidate({ lx, p.pos.y + p.size.y - e.size.y }); // Align bottom
+                evalCandidate({ lx, p.pos.y });
+                evalCandidate({ lx, p.pos.y + (p.size.y - e.size.y) / 2.0 });
+                evalCandidate({ lx, p.pos.y + p.size.y - e.size.y });
 
                 double by = p.pos.y + p.size.y + GAP;
-                evalCandidate({ p.pos.x, by }); // Align left
-                evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, by }); // Align center
-                evalCandidate({ p.pos.x + p.size.x - e.size.x, by }); // Align right
+                evalCandidate({ p.pos.x, by });
+                evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, by });
+                evalCandidate({ p.pos.x + p.size.x - e.size.x, by });
 
                 double ty = p.pos.y - (e.size.y + GAP);
-                evalCandidate({ p.pos.x, ty }); // Align left
-                evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, ty }); // Align center
-                evalCandidate({ p.pos.x + p.size.x - e.size.x, ty }); // Align right
+                evalCandidate({ p.pos.x, ty });
+                evalCandidate({ p.pos.x + (p.size.x - e.size.x) / 2.0, ty });
+                evalCandidate({ p.pos.x + p.size.x - e.size.x, ty });
             }
 
             if (!found) {

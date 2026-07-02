@@ -4,7 +4,6 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
     return HYPRLAND_API_VERSION;
 }
 
-// Dispatcher declarations (defined in canvas.cpp)
 extern SDispatchResult dispatchToggle(std::string args);
 extern SDispatchResult dispatchEnter(std::string args);
 extern SDispatchResult dispatchExit(std::string args);
